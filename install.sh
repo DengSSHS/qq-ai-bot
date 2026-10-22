@@ -323,6 +323,10 @@ mkdir -p "$DSH_HOME/admin"
 cp -f "$STACK/systemd"/*.service "$STACK/systemd"/*.timer "$STACK/systemd"/*.path /etc/systemd/system/
 mkdir -p /etc/systemd/system/dsh-onebot.service.d
 cp -f "$STACK/systemd/dsh-onebot.service.d"/*.conf /etc/systemd/system/dsh-onebot.service.d/
+# unit 里写死的是默认路径，按实际参数替换（否则改了 DSH_HOME 服务起不来）
+if [ "$DSH_HOME" != "/opt/dsh" ] || [ "$NODE_DIR" != "/opt/node" ]; then
+  sed -i -e "s|/opt/dsh|${DSH_HOME}|g" -e "s|/opt/node|${NODE_DIR}|g"       /etc/systemd/system/*.service /etc/systemd/system/dsh-onebot.service.d/*.conf
+fi
 touch /var/log/dsh-onebot.log
 systemctl daemon-reload
 systemctl enable --now dsh-onebot.service   >>"$LOG" 2>&1 || warn "dsh-onebot 启动失败，看 journalctl"

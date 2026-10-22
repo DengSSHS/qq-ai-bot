@@ -15,6 +15,22 @@
 - **人设三选项**：`builtin`（现成那份）/ `generated`（按描述生成）/ `custom`（完全自己写），默认第一个
 - **代码里的角色名中性化**：体检、审计、记忆服务的标题不再出现具体角色
 
+
+### 上线前检测发现并修掉的问题（v0.1.0 发布前）
+
+加了 `preflight.sh`（64 项静态自检）之后，它自己抓出三类问题：
+
+1. **systemd 单元路径写死** —— `deploy.env` 允许改 `DSH_HOME`，但 unit 里 5 处
+   硬编码 `/opt/dsh`、2 处 `/opt/node`。改了路径就服务起不来。已修：install.sh
+   复制 unit 后按实际参数重写。
+2. **`ttyd.service` 依赖的 `ttyd-run.sh` 不在包里** —— 手动启用必失败。
+   已移到 `stack/systemd/optional/`，默认不安装。
+3. **检测器自身的坑** —— 在 Windows 上 `command -v python3` 会命中商店别名存根
+   （存在但跑不起来，退出码 49）。改成实际执行一次探测才认。
+
+另外给 preflight 加了 systemd 一致性检查：每个 unit 的 `ExecStart` 引用的脚本
+必须在包里存在，防止再出现"引用了不存在的文件"。
+
 ### 之前踩过的坑（修复记录，供参考）
 
 **看图**

@@ -19,9 +19,13 @@
 
 ## 三、验证方式
 
-没有单元测试，用两层运行时检查：
+没有单元测试，用三层检查（改完至少跑第一层）：
 
 ```bash
+# 第一层：静态自检，64 项，不需要服务器
+bash preflight.sh
+
+# 第二层/第三层（需要真实部署）
 # 语法层：所有 Python + Shell
 python3 -m py_compile stack/*.py qr_wait.py
 bash -n install.sh verify.sh stack/*.sh

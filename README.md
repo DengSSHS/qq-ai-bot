@@ -134,7 +134,9 @@ SECURITY.md         权限模型、暴露面、SSRF 防护、密钥管理
 CONTRIBUTING.md     怎么改、怎么验、不许碰的边界
 VERSION             当前版本
 install.sh          幂等安装脚本
-verify.sh           15 项验收，输出 VERDICT: READY / NOT READY
+verify.sh           15 项部署验收，输出 VERDICT
+preflight.sh        64 项静态自检（上线前跑，不需要服务器）
+scripts/            preflight 的 Python 侧检查
 qr_wait.py          扫码等待器（自动提取二维码，登录后自动继续）
 deploy.env.example  参数模板
 persona/
@@ -147,14 +149,20 @@ stack/              运行时主体：12 个 Python 服务/工具 + 配置模板
 ## 开发
 
 ```bash
-# 语法层（不需要服务器）
+# 第一层：静态自检（不需要服务器，64 项）
+bash preflight.sh               # 看最后一行 VERDICT: STATIC OK
+
+# 第二层：语法（preflight 已包含，也可单独跑）
 python3 -m py_compile stack/*.py qr_wait.py
 bash -n install.sh verify.sh
 
-# 运行层（在真实部署上）
+# 第三层：运行层（在真实部署上）
 bash verify.sh                  # 15 项，看最后一行 VERDICT
 python3 /opt/dsh/checkall.py    # 106 项，0 失败才算过
 ```
+
+**注意**：`preflight.sh` 只能证明"代码和文档自身没明显错误"，
+不能替代干净机器上的真实部署验证。
 
 Python **3.8+**，零第三方依赖（`requirements.txt` 里只有说明）。
 改动规矩、硬约束、不接受的方向见 `CONTRIBUTING.md`。
