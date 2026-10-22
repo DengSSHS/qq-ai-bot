@@ -42,7 +42,9 @@ python3 /opt/dsh/checkall.py      # 106 项，0 失败才算过
 4. **不要给机器人加 `bash` / `fs` 工具**。真要排查，临时开、用完关，见 `SECURITY.md`
 5. **不要把备份放进 `sessions/` 目录**。workspace 插件会扫描它，非标准布局会让整条
    插件链 pending、8643 不监听（踩过两次）
-6. **`.sh` 文件必须 LF 换行**。CRLF 会导致 `syntax error: word unexpected`
+6. **`.sh` 文件必须 LF 换行**。CRLF 会导致 `syntax error: word unexpected`。
+   仓库根目录有 `.gitattributes` 强制 `eol=lf`，别删它——Windows 用户 clone 后
+   如果换行符被转成 CRLF，部署脚本会直接语法错误。
 7. **不要提交 `deploy.env`**、任何 `.bak-*` 备份、`__pycache__`
 
 ## 五、代码风格
