@@ -1,0 +1,18 @@
+[Unit]
+Description=LLM shim: force-disable reasoning for providers that default to thinking
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 上游真实地址（含路径前缀）；install.sh 会按 deploy.env 重写这一行
+Environment=LLM_UPSTREAM=https://api.deepseek.com
+Environment=LLM_LOCAL_BASE=/v1
+ExecStart=/usr/bin/python3 /opt/dsh/llm_shim.py --host 127.0.0.1 --port 8890
+Restart=always
+RestartSec=3
+StandardOutput=append:/var/log/llm-shim.log
+StandardError=append:/var/log/llm-shim.log
+
+[Install]
+WantedBy=multi-user.target

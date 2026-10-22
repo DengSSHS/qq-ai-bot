@@ -1,0 +1,11 @@
+{
+  "name": "local-memory",
+  "version": "1.0.0",
+  "private": true,
+  "description": "记忆/日记 MCP 桥：日记、长期笔记、检索",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

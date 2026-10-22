@@ -1,0 +1,6 @@
+[Unit]
+Description=Apply tool mode switch
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/dsh/toolmode.py

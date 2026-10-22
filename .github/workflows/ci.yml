@@ -1,0 +1,114 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Python 语法（含 3.8 兼容性）
+        run: |
+          set -e
+          python - <<'PY'
+          import ast, glob, sys
+          bad = 0
+          for f in sorted(glob.glob("stack/*.py") + glob.glob("*.py")):
+              src = open(f, encoding="utf-8").read()
+              try:
+                  ast.parse(src, feature_version=(3, 8))
+              except SyntaxError as e:
+                  print("FAIL(3.8) %s: %s" % (f, e)); bad += 1
+              try:
+                  compile(src, f, "exec")
+              except SyntaxError as e:
+                  print("FAIL %s: %s" % (f, e)); bad += 1
+          sys.exit(1 if bad else 0)
+          PY
+
+      - name: Shell 语法
+        run: |
+          set -e
+          for f in install.sh verify.sh; do bash -n "$f"; done
+          for f in stack/*.sh; do bash -n "$f"; done
+
+      - name: HTML/YAML 结构（模板占位符完整性）
+        run: |
+          set -e
+          t=stack/cordis.patch.yml.tpl
+          for k in __LLM_MODEL__ __WS_TOKEN__ __BOT_QQ__ __OWNER_QQ__; do
+            grep -q "$k" "$t" || { echo "模板缺少占位符 $k"; exit 1; }
+          done
+          python -c "import yaml,sys; yaml.safe_load(open('stack/cordis.patch.yml.tpl'))" 2>/dev/null \
+            || echo "(没装 pyyaml，跳过 YAML 解析)"
+
+  hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 禁止提交的文件
+        run: |
+          set -e
+          bad=0
+          for f in deploy.env; do
+            [ -e "$f" ] && { echo "不该提交: $f"; bad=1; }
+          done
+          find . -name '*.bak-*' -not -path './.git/*' | grep . && { echo "提交了备份文件"; bad=1; } || true
+          find . -name '__pycache__' -not -path './.git/*' | grep . && { echo "提交了 __pycache__"; bad=1; } || true
+          exit $bad
+
+      - name: 密钥指纹扫描
+        run: |
+          set -e
+          bad=0
+          # 真密钥形态
+          if grep -rnE 'sk-[A-Za-z0-9]{20,}' --exclude-dir=.git . ; then
+            echo "发现疑似 API key"; bad=1
+          fi
+          if grep -rnE 'BEGIN [A-Z ]*PRIVATE KEY' --exclude-dir=.git . ; then
+            echo "发现私钥"; bad=1
+          fi
+          if grep -rnE 'accessToken:[[:space:]]*"[0-9a-f]{20,}"' --exclude-dir=.git . ; then
+            echo "发现写死的 accessToken"; bad=1
+          fi
+          # 私有端点不应出现（占位符除外）
+          if grep -rn 'maas\.qianwen' --exclude-dir=.git . ; then
+            echo "发现私有端点"; bad=1
+          fi
+          exit $bad
+
+      - name: 换行符（.sh 必须 LF）
+        run: |
+          set -e
+          bad=0
+          for f in install.sh verify.sh stack/*.sh; do
+            if grep -q $'\r' "$f"; then echo "CRLF: $f"; bad=1; fi
+          done
+          exit $bad
+
+      - name: 示例人设不应残留占位符
+        run: |
+          set -e
+          if grep -q '{{' persona/example-jingjing.md; then
+            echo "example 人设里有 {{占位符}}，应只在 TEMPLATE.md 中"; exit 1
+          fi
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck（仅提示，不阻塞）
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          shellcheck -S warning install.sh verify.sh || true
+          for f in stack/*.sh; do shellcheck -S warning "$f" || true; done

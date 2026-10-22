@@ -1,0 +1,18 @@
+[Unit]
+Description=DeepSeek Harness host with the QQ OneBot bridge
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=DSH_HOME=/opt/dsh
+Environment=PATH=/opt/node/bin:/usr/local/bin:/usr/bin:/bin
+WorkingDirectory=/opt/dsh
+ExecStart=/opt/node/bin/dsh web --no-open --port 8090
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/dsh-onebot.log
+StandardError=append:/var/log/dsh-onebot.log
+
+[Install]
+WantedBy=multi-user.target

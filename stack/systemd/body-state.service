@@ -1,0 +1,6 @@
+[Unit]
+Description=Jingjing body/state refresh (writes AGENTS.md "现在的状态")
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/dsh/body_state.py

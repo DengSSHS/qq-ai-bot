@@ -1,0 +1,23 @@
+# 部署参数（含模型 key，绝不提交）
+deploy.env
+*.env
+!deploy.env.example
+
+# 备份文件
+*.bak-*
+*.bak
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# 运行时产物
+*.log
+logs/
+
+# 编辑器 / 系统
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

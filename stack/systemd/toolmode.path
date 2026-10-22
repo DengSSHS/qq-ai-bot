@@ -1,0 +1,8 @@
+[Unit]
+Description=Watch tool mode request
+
+[Path]
+PathExists=/opt/dsh/toolmode.request
+
+[Install]
+WantedBy=paths.target

@@ -1,0 +1,6 @@
+[Unit]
+Description=Jingjing her own daily rhythm (ported from dsh-proactive)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/dsh/proactive.py

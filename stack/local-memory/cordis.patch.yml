@@ -1,0 +1,46 @@
+- insert:
+  - id: mcp-memory
+    name: '@deepseek-ai/dsh-mcp-client'
+    config:
+      serverName: memory
+      transport: stdio
+      command: python3
+      args:
+        - /opt/dsh/memory_server.py
+      env:
+        MEMORY_DIR: /opt/dsh/memory
+  - id: mcp-websurf
+    name: '@deepseek-ai/dsh-mcp-client'
+    config:
+      serverName: websurf
+      transport: stdio
+      command: python3
+      args:
+        - /opt/dsh/websurf.py
+  - id: mcp-imagen
+    name: '@deepseek-ai/dsh-mcp-client'
+    config:
+      serverName: imagen
+      transport: stdio
+      command: python3
+      args:
+        - /opt/dsh/imagen.py
+  - id: mcp-vision
+    name: '@deepseek-ai/dsh-mcp-client'
+    config:
+      serverName: vision
+      transport: stdio
+      command: python3
+      args:
+        - /opt/dsh/seer.py
+      env:
+        # 看图用的多模态端点；不填则用 seer.py 里的默认值
+        VISION_BASE: __VISION_BASE__
+  - id: mcp-admin
+    name: '@deepseek-ai/dsh-mcp-client'
+    config:
+      serverName: admin
+      transport: stdio
+      command: python3
+      args:
+        - /opt/dsh/admin.py
