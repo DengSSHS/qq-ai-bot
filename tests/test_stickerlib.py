@@ -567,3 +567,254 @@ class NearDuplicateBlocksIngest(unittest.TestCase):
                               "ratio": stickerlib.image_ratio(a)}}, f)
         out = stickerlib.ingest({"path": b, "scene": "杂图", "safe": True})
         self.assertNotIn("很像", out, "内容不同的图不该被当成重复")
+
+
+class AnnouncePending(unittest.TestCase):
+    """结算后的最后一环：把 pending 里的图递给她收。
+
+    背景：--settle 只把图复制进 pending/ 就结束了，真正入库是插件私有能力
+    （qq_save_sticker），Python 侧调不到。凌晨 3 点没人醒着，所以注入一条
+    消息把待收清单递过去。injectDryRun 拦的是出站写，qq_save_sticker 是
+    本地文件操作，不在拦截范围（实测能入库）。
+    """
+
+    CONF = """    botQQ: "3600398389"
+    allowFrom:
+      - "1709392682"
+"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self._saved = (stickerlib.MEDIA_DIR, stickerlib.PENDING,
+                       stickerlib.ANNOUNCED, stickerlib.PLUGIN_CONF,
+                       stickerlib.TRIAGE)
+        stickerlib.MEDIA_DIR = os.path.join(self.tmp, "media")
+        stickerlib.PENDING = os.path.join(self.tmp, "pending")
+        stickerlib.ANNOUNCED = os.path.join(self.tmp, "announced.json")
+        stickerlib.PLUGIN_CONF = os.path.join(self.tmp, "conf.yml")
+        stickerlib.TRIAGE = os.path.join(self.tmp, "triage.jsonl")
+        os.makedirs(stickerlib.MEDIA_DIR)
+        os.makedirs(stickerlib.PENDING)
+        with open(stickerlib.PLUGIN_CONF, "w", encoding="utf-8") as f:
+            f.write(self.CONF)
+
+    def tearDown(self):
+        (stickerlib.MEDIA_DIR, stickerlib.PENDING, stickerlib.ANNOUNCED,
+         stickerlib.PLUGIN_CONF, stickerlib.TRIAGE) = self._saved
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _put(self, name):
+        p = os.path.join(stickerlib.PENDING, name)
+        with open(p, "wb") as f:
+            f.write(b"\xff\xd8fake")
+        return p
+
+    def _events(self):
+        p = stickerlib._inject_path()
+        if not os.path.exists(p):
+            return []
+        return [json.loads(x) for x in open(p, encoding="utf-8") if x.strip()]
+
+    def test_reads_owner_and_bot_from_config(self):
+        """真实配置里号是带引号的（- "1709392682"）。
+
+        夹具必须照抄真实形状。早先我用裸数字写夹具、正则也只认裸数字，
+        测试全绿但线上读不到——夹具替正则自证了清白。
+        """
+        bot, owner = stickerlib._owner_and_bot()
+        self.assertEqual(bot, 3600398389)
+        self.assertEqual(owner, 1709392682)
+
+    def test_reads_unquoted_numbers_too(self):
+        conf = "    botQQ: 3600398389\n    allowFrom:\n      - 1709392682\n"
+        with open(stickerlib.PLUGIN_CONF, "w", encoding="utf-8") as f:
+            f.write(conf)
+        bot, owner = stickerlib._owner_and_bot()
+        self.assertEqual((bot, owner), (3600398389, 1709392682))
+
+    def test_empty_pending_does_nothing(self):
+        out = stickerlib.announce_pending(dry_run=False)
+        self.assertIn("没有图", out)
+        self.assertEqual(self._events(), [])
+
+    def test_dry_run_writes_nothing(self):
+        self._put("a.jpg")
+        out = stickerlib.announce_pending(dry_run=True)
+        self.assertIn("dry-run", out)
+        self.assertEqual(self._events(), [], "dry-run 不该写注入文件")
+
+    def test_injects_owner_message_with_files(self):
+        self._put("a.jpg")
+        self._put("b.png")
+        out = stickerlib.announce_pending(dry_run=False)
+        self.assertIn("已通知", out)
+        evs = self._events()
+        self.assertEqual(len(evs), 1)
+        ev = evs[0]
+        # 注入事件必须是主人的私聊消息，否则她不会当回事
+        self.assertEqual(ev["message_type"], "private")
+        self.assertEqual(ev["user_id"], 1709392682)
+        self.assertEqual(ev["self_id"], 3600398389)
+        self.assertIn("a.jpg", ev["raw_message"])
+        self.assertIn("b.png", ev["raw_message"])
+        self.assertIn("qq_save_sticker", ev["raw_message"])
+
+    def test_does_not_reannounce(self):
+        """同一张图不能天天通知——她会以为是新的。"""
+        self._put("a.jpg")
+        stickerlib.announce_pending(dry_run=False)
+        out = stickerlib.announce_pending(dry_run=False)
+        self.assertIn("通知过", out)
+        self.assertEqual(len(self._events()), 1, "重复通知了")
+
+    def test_new_file_after_announce_is_announced(self):
+        self._put("a.jpg")
+        stickerlib.announce_pending(dry_run=False)
+        self._put("c.gif")
+        stickerlib.announce_pending(dry_run=False)
+        evs = self._events()
+        self.assertEqual(len(evs), 2)
+        self.assertIn("c.gif", evs[1]["raw_message"])
+
+    def test_respects_limit(self):
+        for i in range(5):
+            self._put("f%d.jpg" % i)
+        stickerlib.announce_pending(limit=2, dry_run=False)
+        msg = self._events()[0]["raw_message"]
+        self.assertEqual(msg.count("- f"), 2, "limit 没生效")
+        self.assertIn("还有 3 张", msg)
+
+    def test_scene_hint_passed_through(self):
+        """结算已经判过场景了，顺手带给她，省得 ingest 再猜。"""
+        self._put("a.jpg")
+        with open(stickerlib.TRIAGE, "w", encoding="utf-8") as f:
+            f.write(json.dumps({"file": "a.jpg", "scene": "嘲讽怼人",
+                                "verdict": True, "sha": "x"}, ensure_ascii=False) + "\n")
+        stickerlib.announce_pending(dry_run=False)
+        self.assertIn("嘲讽怼人", self._events()[0]["raw_message"])
+
+    def test_bad_config_does_not_send(self):
+        """配置读不到就什么都不发——不能往错的号发。"""
+        self._put("a.jpg")
+        with open(stickerlib.PLUGIN_CONF, "w", encoding="utf-8") as f:
+            f.write("nothing here\n")
+        out = stickerlib.announce_pending(dry_run=False)
+        self.assertIn("读不到", out)
+        self.assertEqual(self._events(), [])
+
+
+class DedupEntries(unittest.TestCase):
+    """清掉 phash 完全相同的重复条目。
+
+    实测踩到过：`菲比-哎呀` 和 `菲比-1哎呀` 在库里各存一份，phash 距离 0、
+    sha256 不同（同一张图不同编码）。这类只能手工清，因为插件没有删除工具，
+    而且 must 在停服时改——插件把索引读进内存后靠快照写回。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self._saved = (stickerlib.STICKERS, stickerlib.TAGS, stickerlib.EXTRAS,
+                       stickerlib.DUPES)
+        stickerlib.STICKERS = os.path.join(self.tmp, "stickers.json")
+        stickerlib.TAGS = os.path.join(self.tmp, "tags.json")
+        stickerlib.EXTRAS = os.path.join(self.tmp, "extras.json")
+        stickerlib.DUPES = os.path.join(self.tmp, "dupes")
+
+    def tearDown(self):
+        (stickerlib.STICKERS, stickerlib.TAGS, stickerlib.EXTRAS,
+         stickerlib.DUPES) = self._saved
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _setup(self, hits_small, hits_big, size_small=10, size_big=20):
+        ph = "a" * 64
+        fa = os.path.join(self.tmp, "a.webp")
+        fb = os.path.join(self.tmp, "b.webp")
+        with open(fa, "wb") as f:
+            f.write(b"x" * size_small)
+        with open(fb, "wb") as f:
+            f.write(b"x" * size_big)
+        stickers = [
+            {"id": "idA", "name": "菲比-1哎呀", "file": fa, "hits": hits_small},
+            {"id": "idB", "name": "菲比-哎呀", "file": fb, "hits": hits_big},
+            {"id": "idC", "name": "别的图", "file": os.path.join(self.tmp, "c.webp"),
+             "hits": 0},
+        ]
+        with open(stickerlib.STICKERS, "w", encoding="utf-8") as f:
+            json.dump(stickers, f)
+        with open(stickerlib.TAGS, "w", encoding="utf-8") as f:
+            json.dump({"idA": {"scene": "杂图"}, "idB": {"scene": "杂图"},
+                       "idC": {"scene": "杂图"}}, f)
+        with open(stickerlib.EXTRAS, "w", encoding="utf-8") as f:
+            json.dump({"idA": {"phash": ph}, "idB": {"phash": ph},
+                       "idC": {"phash": "b" * 64}}, f)
+        return fa, fb
+
+    def test_dry_run_changes_nothing(self):
+        self._setup(0, 0)
+        out = stickerlib.dedup(apply_=False)
+        self.assertIn("dry-run", out)
+        self.assertEqual(len(stickerlib.load_json(stickerlib.STICKERS, [])), 3)
+
+    def test_keeps_more_used_one(self):
+        """发得多的那张留下——清哪张不能靠 id 字母序。"""
+        fa, fb = self._setup(hits_small=0, hits_big=7)
+        stickerlib.dedup(apply_=True)
+        left = stickerlib.load_json(stickerlib.STICKERS, [])
+        self.assertEqual([s["id"] for s in left], ["idB", "idC"])
+        self.assertFalse(os.path.exists(fa), "被清的那张文件应该移走")
+        self.assertTrue(os.path.exists(fb), "保留的那张文件不该动")
+
+    def test_tie_falls_back_to_id_when_no_pixels(self):
+        """hits / 像素面积都一样时，用 id 定序，保证结果可复现（不是随机的）。"""
+        self._setup(hits_small=0, hits_big=0, size_small=10, size_big=10)
+        stickerlib.dedup(apply_=True)
+        left = [s["id"] for s in stickerlib.load_json(stickerlib.STICKERS, [])]
+        self.assertEqual(left, ["idA", "idC"], "idA 字典序在前，应该留下")
+
+    def test_tie_broken_by_pixel_area_not_file_size(self):
+        """hits 一样时按像素面积留，不按文件大小。
+
+        同一张图存成 7MB PNG（2880x1440）和 105KB WebP（850x425）时，
+        按文件大小会留下那个大 PNG——对表情包是浪费。
+        """
+        if not stickerlib.HAS_PIL:
+            self.skipTest("没装 Pillow")
+        from PIL import Image
+        fa = os.path.join(self.tmp, "small.png")
+        fb = os.path.join(self.tmp, "big.png")
+        Image.new("RGB", (100, 100), (1, 2, 3)).save(fa)
+        Image.new("RGB", (400, 400), (1, 2, 3)).save(fb)
+        self.assertLess(os.path.getsize(fa), os.path.getsize(fb))
+        ph = "a" * 64
+        with open(stickerlib.STICKERS, "w", encoding="utf-8") as f:
+            json.dump([{"id": "idSmall", "name": "小", "file": fa, "hits": 0},
+                       {"id": "idBig", "name": "大", "file": fb, "hits": 0}], f)
+        with open(stickerlib.TAGS, "w", encoding="utf-8") as f:
+            json.dump({}, f)
+        with open(stickerlib.EXTRAS, "w", encoding="utf-8") as f:
+            json.dump({"idSmall": {"phash": ph}, "idBig": {"phash": ph}}, f)
+        stickerlib.dedup(apply_=True)
+        left = [s["id"] for s in stickerlib.load_json(stickerlib.STICKERS, [])]
+        self.assertEqual(left, ["idBig"], "应该留像素面积大的那张")
+
+    def test_tags_and_extras_cleaned(self):
+        """清掉的那条必须同时从 tags / extras 里消失，否则会留孤儿记录。"""
+        self._setup(0, 0)
+        before = {s["id"] for s in stickerlib.load_json(stickerlib.STICKERS, [])}
+        stickerlib.dedup(apply_=True)
+        after = {s["id"] for s in stickerlib.load_json(stickerlib.STICKERS, [])}
+        gone = before - after
+        self.assertEqual(len(gone), 1, "应该正好清掉一条")
+        gone = gone.pop()
+        tags = stickerlib.load_json(stickerlib.TAGS, {})
+        ex = stickerlib.load_json(stickerlib.EXTRAS, {})
+        self.assertNotIn(gone, tags)
+        self.assertNotIn(gone, ex)
+
+    def test_backup_created(self):
+        self._setup(0, 0)
+        stickerlib.dedup(apply_=True)
+        baks = [f for f in os.listdir(self.tmp) if ".bak-dedup-" in f]
+        self.assertTrue(baks, "改动前必须留备份")

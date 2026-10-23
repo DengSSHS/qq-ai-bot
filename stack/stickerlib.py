@@ -582,6 +582,10 @@ def handle(req):
 MEDIA_DIR = os.path.join(BASE, "media/onebot")
 TRIAGE = os.path.join(BASE, "sticker-pack/triage.jsonl")
 PENDING = os.path.join(BASE, "sticker-pack/pending")
+ANNOUNCED = os.path.join(BASE, "sticker-pack/pending-announced.json")
+DUPES = os.path.join(BASE, "sticker-pack/dupes")      # dedup 清出来的重复图留底
+PLUGIN_CONF = os.path.join(BASE, "profiles/web/cordis.patch.yml")
+PENDING_KEEP_DAYS = 14          # pending 里的图留多久（超过就清，防无限堆）
 TRIAGE_MAX_AGE_H = 5.5          # 插件 TTL 是 6 小时，留半小时余量
 
 TRIAGE_QUESTION = """这张图适合当作 QQ 群聊里的表情包素材收录吗？严格判断，宁缺毋滥。
@@ -986,6 +990,266 @@ def media_triage(args=None):
     return chr(10).join(out)
 
 
+# ────────────── 结算后的最后一环：通知她来收 ──────────────
+#
+# 为什么必须有这一步：--settle 只把值得收的图复制进 pending/，然后就没了。
+# 真正入库是插件的私有能力（qq_save_sticker → store.addFromFile），Python 侧
+# 调不到。所以最后的动作只能由她执行——而凌晨 3 点她已经睡下了，得有人叫醒她。
+#
+# 为什么不直接改 stickers.json：插件启动时把索引读进内存，之后全靠内存快照
+# 写回（sticker-store.js 的 this.loaded + snapshot）。手改文件会被下一次发图
+# （noteUsed 加 hits）覆盖回去，除非停服——那就变成每次入库都要重启服务。
+#
+# 注入为什么可行：injectDryRun 拦的是「出站写」（send_*/set_*/delete_msg），
+# 而 qq_save_sticker 是本地文件操作，不在拦截范围。实测：注入后她会依次调
+# sticker_ingest 和 qq_save_sticker，库从 4244 变 4245，且没有任何消息
+# 真的发到 QQ。
+
+def _inject_path():
+    return os.path.join(MEDIA_DIR, "qq-inject.jsonl")
+
+
+def _owner_and_bot():
+    """从插件配置里读 botQQ 和主人的 QQ。
+
+    读不到就返回 (None, None)——宁可这次不通知，也不往错的号发。
+    """
+    bot = owner = None
+    try:
+        txt = open(PLUGIN_CONF, encoding="utf-8").read()
+        m = re.search(r'botQQ:\s*"?(\d{5,15})', txt)
+        if m:
+            bot = int(m.group(1))
+        # 注意：真实配置里号是带引号的（`- "1709392682"`）。别写死成 -\d+，
+        # 也别按裸数字写测试夹具——那等于让夹具替正则自证清白（踩过）。
+        m = re.search(r'allowFrom:[ \t]*\r?\n((?:[ \t]*-[^\n]*\n){1,6})', txt)
+        if m:
+            mm = re.search(r'(\d{5,15})', m.group(1))
+            if mm:
+                owner = int(mm.group(1))
+    except Exception as e:
+        log("announce config read fail: %s" % e)
+    return bot, owner
+
+
+def _pending_scene_map():
+    """pending 文件名 → 结算时判出来的场景。
+
+    顺手带给她，省得 ingest 时再猜一遍（结算已经把图看过了）。
+    """
+    out = {}
+    try:
+        for line in open(TRIAGE, encoding="utf-8"):
+            try:
+                r = json.loads(line)
+            except Exception:
+                continue
+            if r.get("file") and r.get("scene"):
+                out[r["file"]] = r["scene"]
+    except Exception:
+        pass
+    return out
+
+
+def _prune_pending(now=None):
+    """清掉 pending 里留太久的图（都是副本，原件另有去处）。返回清了几张。"""
+    now = now or time.time()
+    n = 0
+    if not os.path.isdir(PENDING):
+        return 0
+    for fn in os.listdir(PENDING):
+        p = os.path.join(PENDING, fn)
+        try:
+            if (os.path.isfile(p)
+                    and (now - os.path.getmtime(p)) > PENDING_KEEP_DAYS * 86400):
+                os.remove(p)
+                n += 1
+        except Exception:
+            pass
+    return n
+
+
+def announce_pending(limit=8, dry_run=True):
+    """把 pending/ 里新收的图告知她（注入一条「主人」发的消息）。
+
+    dry_run=True 只报告会通知什么，不写注入文件。
+    """
+    pruned = _prune_pending()
+    if not os.path.isdir(PENDING):
+        return "pending 目录还没有，这次没有要收的图。"
+    files = []
+    for fn in sorted(os.listdir(PENDING)):
+        p = os.path.join(PENDING, fn)
+        if os.path.isfile(p) and fn.lower().endswith((".jpg", ".jpeg", ".png", ".gif", ".webp")):
+            files.append(fn)
+    if not files:
+        msg = "pending 里没有图，不用通知。"
+        return msg + ("（顺手清掉 %d 张超期的）" % pruned if pruned else "")
+
+    try:
+        announced = load_json(ANNOUNCED, {})
+    except Exception:
+        announced = {}
+    if not isinstance(announced, dict):
+        announced = {}
+    # 已经不在 pending 里的条目也一并忘掉，防止记录无限长
+    announced = {k: v for k, v in announced.items() if k in files}
+
+    new = [f for f in files if f not in announced]
+    if not new:
+        msg = "pending 里 %d 张都通知过了，没有新的。" % len(files)
+        return msg + ("（顺手清掉 %d 张超期的）" % pruned if pruned else "")
+
+    batch = new[:max(1, int(limit))]
+    scenes = _pending_scene_map()
+    lines = ["刚收的图放在 %s/ 了，你挑值得的收进表情库：" % PENDING]
+    for fn in batch:
+        sc = scenes.get(fn)
+        lines.append("- %s%s" % (fn, ("（场景建议：%s）" % sc) if sc else ""))
+    if len(new) > len(batch):
+        lines.append("（还有 %d 张，下次再说）" % (len(new) - len(batch)))
+    lines.append("用 sticker_ingest 记一下，通过了再 qq_save_sticker。觉得不行的就不用管。")
+    text = chr(10).join(lines)
+
+    if dry_run:
+        return "[dry-run] 会注入这条：" + chr(10) + text
+
+    bot, owner = _owner_and_bot()
+    if not bot or not owner:
+        return ("读不到 %s（%s），这次不通知。图还在 pending 里。"
+                % ("botQQ" if not bot else "主人 QQ（allowFrom）", PLUGIN_CONF))
+
+    now = int(time.time())
+    ev = {
+        "post_type": "message", "message_type": "private", "sub_type": "friend",
+        "self_id": bot, "user_id": owner, "time": now, "message_id": now,
+        "raw_message": text,
+        "message": [{"type": "text", "data": {"text": text}}],
+        "sender": {"user_id": owner, "nickname": "主人"},
+    }
+    try:
+        os.makedirs(os.path.dirname(_inject_path()), exist_ok=True)
+        with open(_inject_path(), "a", encoding="utf-8") as f:
+            f.write(json.dumps(ev, ensure_ascii=False) + chr(10))
+    except Exception as e:
+        return "写注入文件失败：%s（图还在 pending 里）" % e
+
+    for fn in batch:
+        announced[fn] = {"ts": now}
+    try:
+        save_json(ANNOUNCED, announced)
+    except Exception as e:
+        log("announce save fail: %s" % e)
+
+    msg = "已通知她收 %d 张（pending 里共 %d 张）" % (len(batch), len(files))
+    if pruned:
+        msg += "，顺手清掉 %d 张超过 %d 天的" % (pruned, PENDING_KEEP_DAYS)
+    if len(new) > len(batch):
+        msg += "；还有 %d 张留到下次" % (len(new) - len(batch))
+    log("announce %s" % msg)
+    return msg
+
+
+def dedup(apply_=False):
+    """清掉库里 phash 完全相同（距离 0）的重复条目，每组留一张。
+
+    ⚠️ **必须在服务停止时跑。** 插件启动时把索引读进内存，之后全靠内存
+    快照写回（sticker-store.js 的 this.loaded + snapshot）。运行中手改
+    stickers.json，会被下一次发图（noteUsed 加 hits）原样覆盖回去。
+
+    保留优先级：发过的次数多 > 文件大（清晰度更高）> id 字典序，结果稳定。
+    不删文件：移到 sticker-pack/dupes/ 留底，索引 / 标签 / 附加数据同步移除。
+    默认 dry-run，加 --apply 才真动。
+    """
+    stickers = load_json(STICKERS, [])
+    tags = load_json(TAGS, {})
+    extras = load_extras()
+    want_len = (PHASH_SIZE * PHASH_SIZE + 3) // 4
+
+    groups = {}
+    for s in stickers:
+        if not isinstance(s, dict) or not s.get("id"):
+            continue
+        ph = (extras.get(s["id"]) or {}).get("phash") or ""
+        if len(ph) != want_len:
+            continue                      # 没 phash 的没法比，跳过不猜
+        groups.setdefault(ph, []).append(s)
+
+    drop = []
+    for ph, arr in groups.items():
+        if len(arr) < 2:
+            continue
+        def rank(s):
+            # 保留优先级：发过的次数 > 像素面积（清晰度）> 文件小（同清晰度下省空间）
+            # 不能用文件大小当清晰度代理：同一张图存成 7MB PNG 和 105KB WebP，
+            # 后者像素小但够用，前者只是格式没压缩。
+            f = s.get("file") or ""
+            area = 0
+            try:
+                if f and os.path.exists(f) and HAS_PIL:
+                    with Image.open(f) as im:
+                        area = int(im.size[0]) * int(im.size[1])
+            except Exception:
+                area = 0
+            try:
+                sz = os.path.getsize(f) if f and os.path.exists(f) else 0
+            except Exception:
+                sz = 0
+            return (-int(s.get("hits") or 0), -area, sz, str(s.get("id")))
+        arr.sort(key=rank)
+        keep = arr[0]
+        for s in arr[1:]:
+            drop.append((keep, s))
+
+    if not drop:
+        return "没有发现 phash 完全相同的重复条目。"
+
+    lines = ["发现 %d 组重复，共要清 %d 条：" % (len({id(k["id"]) for k, _ in drop}), len(drop))]
+    for keep, s in drop:
+        lines.append("  留 id=%s %s（hits=%s）→ 清 id=%s %s（hits=%s）"
+                     % (keep.get("id"), (keep.get("name") or "")[:18], keep.get("hits"),
+                        s.get("id"), (s.get("name") or "")[:18], s.get("hits")))
+
+    if not apply_:
+        lines.append("（dry-run，没动文件。确认后加 --apply，且必须先把服务停掉）")
+        return chr(10).join(lines)
+
+    ts = int(time.time())
+    for p, data in ((STICKERS, stickers), (TAGS, tags), (EXTRAS, extras)):
+        try:
+            import shutil
+            shutil.copy2(p, p + ".bak-dedup-%d" % ts)
+        except Exception as e:
+            log("dedup backup fail %s: %s" % (p, e))
+
+    ids = set()
+    os.makedirs(DUPES, exist_ok=True)
+    for _keep, s in drop:
+        sid = s["id"]
+        ids.add(sid)
+        f = s.get("file") or ""
+        try:
+            if f and os.path.exists(f):
+                dst = os.path.join(DUPES, os.path.basename(f))
+                if os.path.exists(dst):
+                    dst = os.path.join(DUPES, "%s_%s" % (sid, os.path.basename(f)))
+                os.rename(f, dst)
+        except Exception as e:
+            log("dedup move fail %s: %s" % (sid, e))
+
+    stickers[:] = [s for s in stickers if s.get("id") not in ids]
+    for sid in ids:
+        tags.pop(sid, None)
+        extras.pop(sid, None)
+
+    save_json(STICKERS, stickers)
+    save_json(TAGS, tags)
+    save_json(EXTRAS, extras)
+    log("dedup apply removed=%d" % len(ids))
+    lines.append("已清 %d 条，文件已移到 %s（留底，没删）" % (len(ids), DUPES))
+    return chr(10).join(lines)
+
+
 def backfill(limit=0):
     """给库里存量图片补算 pHash。
 
@@ -1046,13 +1310,18 @@ def main():
     if len(sys.argv) > 1 and sys.argv[1] == "--settle":
         # 凌晨结算：判断 + 执行 + 写日报。limit 放大，一次清完当天积压。
         out = media_triage({"apply": True, "limit": 200})
+        # 结算只把图放进 pending/，真正入库得她来调 qq_save_sticker。
+        # 凌晨 3 点没人醒着，所以这里注入一条消息把待收清单递给她。
+        note = announce_pending(limit=8, dry_run=False)
         try:
             with open(os.path.join(BASE, "memory/sticker-daily.log"),
                       "a", encoding="utf-8") as f:
-                f.write("%s%s%s%s" % (time.strftime("%F %T"), chr(10), out, chr(10) * 2))
+                f.write("%s%s%s%s%s%s" % (time.strftime("%F %T"), chr(10),
+                                          out, chr(10), note, chr(10) * 2))
         except Exception as e:
             log("settle log fail: %s" % e)
         print(out)
+        print(note)
         sys.exit(0)
     if len(sys.argv) > 1 and sys.argv[1] == "--triage":
         apply_ = "--apply" in sys.argv
@@ -1061,6 +1330,15 @@ def main():
             if a.isdigit():
                 lim = int(a)
         print(media_triage({"apply": apply_, "limit": lim}))
+        sys.exit(0)
+    if len(sys.argv) > 1 and sys.argv[1] == "--dedup":
+        # ⚠️ 必须服务停止时跑，否则插件会把内存里的旧索引写回来
+        print(dedup(apply_="--apply" in sys.argv))
+        sys.exit(0)
+    if len(sys.argv) > 1 and sys.argv[1] == "--announce":
+        # 手动跑：默认 dry-run，看了内容再决定要不要真注入
+        dry = "--apply" not in sys.argv
+        print(announce_pending(dry_run=dry))
         sys.exit(0)
     if len(sys.argv) > 1 and sys.argv[1] == "--backfill":
         limit = int(sys.argv[2]) if len(sys.argv) > 2 else 0
