@@ -23,10 +23,13 @@ BASE = "/opt/dsh"
 USAGE = os.path.join(BASE, "memory/usage.jsonl")
 CFG = os.path.join(BASE, "budget.json")
 
+# 默认关闭。原因：这是个刹车，装完不该让人莫名其妙被刹车别住——
+# 别人的日用量、模型价格都不一样，默认值猜错了就是"机器人突然不说话了"。
+# 要用就填好 daily_tokens 再把 enabled 改成 true。
 DEFAULTS = {
-    "_note": "daily_tokens 是每天输入+输出 token 总和的上限。soft_ratio 是软线比例。"
-             "想临时停用把 enabled 改成 false。",
-    "enabled": True,
+    "_note": "默认关闭。要用：设 enabled=true 并按自己的量填 daily_tokens"
+             "（每天输入+输出 token 总和的上限），soft_ratio 是软线比例。",
+    "enabled": False,
     "daily_tokens": 3000000,
     "soft_ratio": 0.8,
 }
