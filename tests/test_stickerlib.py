@@ -258,7 +258,7 @@ class Triage(Base):
     def _put(self, name, age_h=0.0):
         p = os.path.join(self.media, name)
         with open(p, "wb") as f:
-            f.write(b"img-" + name.encode())
+            f.write(bytes([255, 216]) + name.encode())
         if age_h:
             old = stickerlib.time.time() - age_h * 3600
             os.utime(p, (old, old))
@@ -351,59 +351,59 @@ class TriageReplyParsing(unittest.TestCase):
         return stickerlib._parse_triage_reply(s)
 
     def test_plain_json(self):
-        v, scene, reason = self.parse(
+        v, scene, safe, reason = self.parse(
             '{"verdict":"YES","scene":"卖萌可爱","reason":"比心存存"}')
         self.assertTrue(v)
         self.assertEqual(scene, "卖萌可爱")
         self.assertEqual(reason, "比心存存")
 
     def test_json_in_code_fence(self):
-        v, scene, _ = self.parse(
+        v, scene, _, _ = self.parse(
             '```json\n{"verdict":"NO","scene":"","reason":"聊天截图"}\n```')
         self.assertFalse(v)
         self.assertEqual(scene, "")
 
     def test_markdown_wrapped_scene(self):
         """模型给标签加了 ** 加粗。"""
-        v, scene, _ = self.parse('{"verdict":"YES","scene":"**无语尴尬**","reason":"翻白眼"}')
+        v, scene, _, _ = self.parse('{"verdict":"YES","scene":"**无语尴尬**","reason":"翻白眼"}')
         self.assertTrue(v)
         self.assertEqual(scene, "无语尴尬")
 
     def test_scene_with_parenthesis(self):
-        v, scene, _ = self.parse('{"verdict":"YES","scene":"撒娇求(要东西)","reason":"求"}')
+        v, scene, _, _ = self.parse('{"verdict":"YES","scene":"撒娇求(要东西)","reason":"求"}')
         self.assertEqual(scene, "撒娇求")
 
     def test_copied_format_template(self):
         """模型把 prompt 里的格式说明当内容输出了（旧竖线格式那版）。"""
-        v, scene, _ = self.parse("标签|一句话理由 YES|忙工作|加载中")
+        v, scene, _, _ = self.parse("标签|一句话理由 YES|忙工作|加载中")
         self.assertTrue(v)
         self.assertEqual(scene, "忙工作")
 
     def test_legacy_pipe_format(self):
-        v, scene, reason = self.parse("YES|嘲讽怼人|斜眼看人配6字")
+        v, scene, safe, reason = self.parse("YES|嘲讽怼人|斜眼看人配6字")
         self.assertTrue(v)
         self.assertEqual(scene, "嘲讽怼人")
         self.assertEqual(reason, "斜眼看人配6字")
 
     def test_prefix_noise(self):
         """模型自说自话加了一堆前缀。"""
-        v, scene, _ = self.parse("结合这九宫格的整体氛围，最贴的标签是：期待等待")
+        v, scene, _, _ = self.parse("结合这九宫格的整体氛围，最贴的标签是：期待等待")
         self.assertEqual(scene, "期待等待")
 
     def test_longest_scene_wins(self):
         """长名优先：否则「杂图」会抢先从任何带这两个字的句子里命中。"""
-        _, scene, _ = self.parse("这不是杂图，应该算期待等待")
+        _, scene, _, _ = self.parse("这不是杂图，应该算期待等待")
         self.assertEqual(scene, "期待等待")
 
     def test_refusal_is_no(self):
         """模型拒绝回答 → 从严当不值得收，不猜。"""
-        v, _, reason = self.parse("我无法对这张图进行分类。")
+        v, _, _, reason = self.parse("我无法对这张图进行分类。")
         self.assertFalse(v)
         self.assertIn("无法", reason)
 
     def test_empty_is_none(self):
         """空返回 → None（拿不准），调用方不能当成"值得"。"""
-        v, _, _ = self.parse("")
+        v, _, _, _ = self.parse("")
         self.assertIsNone(v)
 
     def test_scene_hints_cover_defaults(self):
@@ -818,3 +818,97 @@ class DedupEntries(unittest.TestCase):
         stickerlib.dedup(apply_=True)
         baks = [f for f in os.listdir(self.tmp) if ".bak-dedup-" in f]
         self.assertTrue(baks, "改动前必须留备份")
+
+
+class SafeScreening(unittest.TestCase):
+    """内容风险筛查：和「值不值得收」是两件事。
+
+    事故背景：`judge_safe` 早就写在 ingest 里，但只有她主动调 ingest 才触发，
+    而实测全库 4130 条里只有 1 条有 safe 字段 —— 筛查等于没跑。
+    现在合并进结算的那一次模型调用，每次都会产出结论。
+    """
+
+    def parse(self, s):
+        return stickerlib._parse_triage_reply(s)
+
+    def test_safe_false_parsed(self):
+        v, scene, safe, _ = self.parse(
+            '{"verdict":"YES","scene":"嘲讽怼人","safe":"NO","reason":"聊天截图带名字"}')
+        self.assertTrue(v)
+        self.assertIs(safe, False)
+
+    def test_safe_true_parsed(self):
+        _, _, safe, _ = self.parse(
+            '{"verdict":"YES","scene":"卖萌可爱","safe":"YES","reason":"猫猫举牌"}')
+        self.assertIs(safe, True)
+
+    def test_safe_missing_is_none_not_true(self):
+        """模型没给 safe 就是「不确定」，绝不能默认成安全。
+
+        宁可多留一张可疑图在 pending 里让人看一眼，也不要默默放行。
+        """
+        _, _, safe, _ = self.parse('{"verdict":"YES","scene":"卖萌可爱","reason":"x"}')
+        self.assertIsNone(safe, "缺 safe 字段时不能当成安全")
+
+    def test_legacy_pipe_has_no_safe(self):
+        _, _, safe, _ = self.parse("YES|嘲讽怼人|斜眼看人")
+        self.assertIsNone(safe)
+
+
+class UnsafeNotPending(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self._saved = (stickerlib.MEDIA_DIR, stickerlib.PENDING,
+                       stickerlib.TRIAGE, stickerlib.EXTRAS)
+        stickerlib.MEDIA_DIR = self.tmp
+        stickerlib.PENDING = os.path.join(self.tmp, "pending")
+        stickerlib.TRIAGE = os.path.join(self.tmp, "triage.jsonl")
+        stickerlib.EXTRAS = os.path.join(self.tmp, "extras.json")
+
+    def tearDown(self):
+        (stickerlib.MEDIA_DIR, stickerlib.PENDING,
+         stickerlib.TRIAGE, stickerlib.EXTRAS) = self._saved
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _img(self, name):
+        p = os.path.join(self.tmp, name)
+        with open(p, "wb") as f:
+            f.write(bytes([255, 216]) + name.encode())
+        return p
+
+    def test_unsafe_image_not_copied_to_pending(self):
+        """值得收 + 不安全 → 不复制进 pending，且 extras 里记 safe=False。"""
+        self._img("shot.jpg")
+        saved = stickerlib._triage_one
+        saved_shas = stickerlib._sticker_shas
+        stickerlib._triage_one = lambda p: (True, "嘲讽怼人", False, "聊天截图带真名")
+        stickerlib._sticker_shas = lambda: {}
+        try:
+            out = stickerlib.media_triage({"apply": True})
+        finally:
+            stickerlib._triage_one = saved
+            stickerlib._sticker_shas = saved_shas
+        self.assertIn("内容风险", out)
+        pend = os.path.join(self.tmp, "pending")
+        self.assertFalse(os.path.isdir(pend) and os.listdir(pend),
+                         "不安全的内容不该进 pending")
+        ex = stickerlib.load_json(stickerlib.EXTRAS, {})
+        self.assertTrue(any(v.get("safe") is False for v in ex.values()),
+                        "应该把 safe=False 写进 extras，pick 才能跳过它")
+
+    def test_safe_image_still_copied(self):
+        """值得收 + 安全 → 照常进 pending（别把功能改坏了）。"""
+        self._img("cute.jpg")
+        saved = stickerlib._triage_one
+        saved_shas = stickerlib._sticker_shas
+        stickerlib._triage_one = lambda p: (True, "卖萌可爱", True, "猫猫举牌")
+        stickerlib._sticker_shas = lambda: {}
+        try:
+            stickerlib.media_triage({"apply": True})
+        finally:
+            stickerlib._triage_one = saved
+            stickerlib._sticker_shas = saved_shas
+        pend = os.path.join(self.tmp, "pending")
+        self.assertTrue(os.path.isdir(pend) and os.listdir(pend),
+                        "安全的图应该照常进 pending")

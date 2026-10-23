@@ -603,7 +603,12 @@ TRIAGE_QUESTION = """这张图适合当作 QQ 群聊里的表情包素材收录�
 2. 有明确情绪就一定选那个情绪标签，不许往「杂图」「卖萌可爱」里塞。
 3. 只有纯风景、纯文字、设定图、logo 这类完全看不出情绪的才填「杂图」。
 
-只输出 JSON：{{"verdict":"YES或NO","scene":"标签","reason":"不超过12字"}}
+还要单独判断 safe —— **内容风险**，和"值不值得收"是两件事：
+safe 判 NO 的情况：暴露了别人的隐私（聊天截图里的名字、工牌、快递单、门牌、
+身份证、手机号）、真人自拍、性暗示/擦边、政治敏感、暴力血腥、侮辱特定人群。
+这类图**哪怕很好笑也不入库**：表情包会被随手转发到别的群，泄一次就收不回来。
+
+只输出 JSON：{{"verdict":"YES或NO","scene":"标签","safe":"YES或NO","reason":"不超过12字"}}
 不值得收时 scene 填空字符串。不要输出任何其他内容，不要解释规则。"""
 
 
@@ -713,7 +718,7 @@ def _parse_triage_reply(ans):
     """
     txt = (ans or "").replace("```json", "").replace("```", "").strip()
     if not txt:
-        return None, "", "模型返回空"
+        return None, "", None, "模型返回空"
 
     obj = None
     i, j = txt.find("{"), txt.rfind("}")
@@ -726,9 +731,11 @@ def _parse_triage_reply(ans):
     if isinstance(obj, dict):
         v = _verdict_of(obj.get("verdict"))
         scene = _clean_scene_name(obj.get("scene"))
+        # safe 拿不到就给 None（不确定），绝不默认 True —— 隐私漏一次收不回来
+        safe = _verdict_of(obj.get("safe"))
         reason = str(obj.get("reason") or "").strip()[:80] or txt[:60]
         if v is not None:
-            return v, scene, reason
+            return v, scene, safe, reason
         # JSON 里没写清 verdict：往下走纯文本兜底
 
     # 兼容旧竖线格式 VERDICT|场景|理由。
@@ -741,10 +748,10 @@ def _parse_triage_reply(ans):
             continue
         scene = _clean_scene_name(parts[idx + 1]) if idx + 1 < len(parts) else ""
         reason = parts[idx + 2] if idx + 2 < len(parts) else txt[:60]
-        return v, scene, reason
+        return v, scene, None, reason
 
     # 全崩了：从严当 NO，但把原文留在理由里方便人工复查
-    return False, _clean_scene_name(txt), txt[:60].replace("\n", " ")
+    return False, _clean_scene_name(txt), None, txt[:60].replace("\n", " ")
 
 
 def _triage_one(path):
@@ -754,10 +761,10 @@ def _triage_one(path):
         q = TRIAGE_QUESTION.replace("{scenes}", " / ".join(_scenes_with_hint()))
         ans, err = seer._ask_model(path, q)
         if err or not ans:
-            return None, "", err or "模型没返回"
+            return None, "", None, err or "模型没返回"
         return _parse_triage_reply(ans)
     except Exception as e:
-        return None, "", "判断异常: %s" % e
+        return None, "", None, "判断异常: %s" % e
 
 
 def _file_sha(path):
@@ -929,12 +936,16 @@ def media_triage(args=None):
             parts.append("补执行 %d 张" % fixed)
         return "没有待判断的新图。" + (" " + "，".join(parts) + "。" if parts else "")
 
-    good, bad, unsure = [], [], []
+    good, bad, unsure, unsafe = [], [], [], []
     for p, fn, sha in todo:
-        worth, scene, reason = _triage_one(p)
+        worth, scene, safe, reason = _triage_one(p)
         rec = {"sha": sha, "file": fn, "verdict": worth, "scene": scene,
-               "reason": reason, "ts": int(now), "applied": False}
-        if worth is True:
+               "safe": safe, "reason": reason, "ts": int(now), "applied": False}
+        # 内容风险优先于"值不值得收"：暴露隐私的图再好笑也不能进库，
+        # 表情包会被随手转到别的群，漏一次收不回来。
+        if worth is True and safe is False:
+            unsafe.append(rec)
+        elif worth is True:
             good.append(rec)
         elif worth is False:
             bad.append(rec)
@@ -945,7 +956,7 @@ def media_triage(args=None):
         if apply_:
             try:
                 os.makedirs(PENDING, exist_ok=True)
-                if worth is True:
+                if worth is True and safe is not False:
                     import shutil
                     shutil.copy2(p, os.path.join(PENDING, fn))
                     rec["applied"] = True
@@ -954,6 +965,17 @@ def media_triage(args=None):
                     os.remove(p)
                     rec["applied"] = True
                     rec["action"] = "deleted"
+                # 把内容风险结论写进 extras：以后这张图真入库时，
+                # pick() 会跳过 safe=False 的条目（见 pick 里的过滤）
+                if safe is not None and sha:
+                    try:
+                        _ex = load_extras()
+                        _sid = str(sha)[:10]
+                        _ex.setdefault(_sid, {})
+                        _ex[_sid]["safe"] = bool(safe)
+                        save_json(EXTRAS, _ex)
+                    except Exception as _e:
+                        log("triage safe write fail: %s" % _e)
             except Exception as e:
                 rec["action"] = "error: %s" % e
         with open(TRIAGE, "a", encoding="utf-8") as f:
@@ -967,6 +989,12 @@ def media_triage(args=None):
     if fixed:
         head += "，补执行 %d 张" % fixed
     out = [head + "："]
+    if unsafe:
+        out.append("")
+        out.append("⚠ 内容风险 %d 张（值得收但不入库，已挡在 pending 之外）：" % len(unsafe))
+        for r in unsafe:
+            out.append("  %s  %s" % (r["file"], r["reason"][:50]))
+        out.append("  这类图会被随手转到别的群，泄一次收不回来，所以一律不收。")
     if good:
         out.append("")
         out.append("值得收 %d 张：" % len(good))
