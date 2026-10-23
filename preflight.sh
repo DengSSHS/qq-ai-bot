@@ -32,7 +32,8 @@ sec "2. files referenced by install.sh"
 missing=0
 while read -r rel; do
   [ -z "$rel" ] && continue
-  case "$rel" in *deploy.env) continue ;; esac   # 用户自己创建
+  # 这些由 install.sh 运行时生成，不该要求事先存在
+  case "$rel" in *deploy.env|*.ws_token|*.napcat_webui_token) continue ;; esac
   if [ ! -e "$rel" ]; then fail "install.sh references missing: $rel"; missing=$((missing+1)); fi
 done < <(grep -oE '\$HERE/[A-Za-z0-9_./-]+|\$STACK/[A-Za-z0-9_./-]+' install.sh \
          | sed 's|^\$HERE/||; s|^\$STACK/|stack/|' | sort -u)

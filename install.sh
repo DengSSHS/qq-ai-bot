@@ -15,6 +15,7 @@ STACK="$HERE/stack"
 
 DSH_HOME="${DSH_HOME:-/opt/dsh}"
 NAPCAT_DIR="${NAPCAT_DIR:-/opt/qqbot}"
+NAPCAT_IMAGE="${NAPCAT_IMAGE:-mlikiowa/napcat-docker:latest}"
 NODE_DIR="/opt/node"
 NODE_VER="${NODE_VER:-v24.22.0}"
 DSH_VER="${DSH_VER:-0.2.1-rc.2}"
@@ -58,8 +59,30 @@ case "${PERSONA_MODE:-builtin}" in
 esac
 
 rand() { openssl rand -hex 16 2>/dev/null || head -c16 /dev/urandom | od -An -tx1 | tr -d ' \n'; }
-WS_TOKEN="${WS_TOKEN:-$(rand)}"
-NAPCAT_WEBUI_TOKEN="${NAPCAT_WEBUI_TOKEN:-$(rand)}"
+# token 必须幂等：重跑 install 不能换掉它，否则 cordis 与 NapCat 两边会漂移、
+# 8643 静默不响应（踩过两次）。存在就复用，否则生成并落盘。
+TOKEN_FILE="$HERE/.ws_token"
+WEBUI_FILE="$HERE/.napcat_webui_token"
+
+if [ -z "${WS_TOKEN:-}" ]; then
+  if [ -f "$TOKEN_FILE" ]; then
+    WS_TOKEN=$(tr -d '[:space:]' < "$TOKEN_FILE")
+  else
+    WS_TOKEN=$(rand)
+    echo "$WS_TOKEN" > "$TOKEN_FILE"
+    chmod 600 "$TOKEN_FILE" 2>/dev/null || true
+  fi
+fi
+if [ -z "${NAPCAT_WEBUI_TOKEN:-}" ]; then
+  if [ -f "$WEBUI_FILE" ]; then
+    NAPCAT_WEBUI_TOKEN=$(tr -d '[:space:]' < "$WEBUI_FILE")
+  else
+    NAPCAT_WEBUI_TOKEN=$(rand)
+    echo "$NAPCAT_WEBUI_TOKEN" > "$WEBUI_FILE"
+    chmod 600 "$WEBUI_FILE" 2>/dev/null || true
+  fi
+fi
+ok "token 已固定（WS ${#WS_TOKEN} 位 / WebUI ${#NAPCAT_WEBUI_TOKEN} 位，存在 .ws_token 与 .napcat_webui_token）"
 
 [ "$(id -u)" = "0" ] || die "请用 root 跑（sudo bash install.sh）"
 
@@ -233,7 +256,7 @@ mkdir -p "$NAPCAT_DIR"/{data/qq,data/config,data/plugins,logs}
 cat > "$NAPCAT_DIR/compose.yaml" <<COMPEOF
 services:
   napcat:
-    image: mlikiowa/napcat-docker:latest
+    image: ${NAPCAT_IMAGE}
     container_name: napcat
     restart: unless-stopped
     environment:
@@ -262,6 +285,9 @@ if ! docker ps --format '{{.Names}}' | grep -qx napcat; then
 fi
 sleep 5
 docker ps --format '{{.Names}}' | grep -qx napcat && ok "napcat 容器在跑" || die "napcat 容器没起来"
+# 记录实际用的镜像 digest：上游 latest 变了你能发现
+digest=$(docker inspect napcat --format '{{.Image}}' 2>/dev/null | cut -c1-19)
+[ -n "$digest" ] && ok "NapCat 镜像 digest: ${digest}（要锁定就往 deploy.env 写 NAPCAT_IMAGE=...@sha256:...）"
 
 # 容器到宿主 docker 网关（NapCat 要连宿主上的 8643）
 GW=$(docker network inspect qqbot_default -f '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null || true)

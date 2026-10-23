@@ -19,13 +19,16 @@
 
 ## 三、验证方式
 
-没有单元测试，用三层检查（改完至少跑第一层）：
+四层检查（改完至少跑前两层）：
 
 ```bash
-# 第一层：静态自检，64 项，不需要服务器
+# 1. 单元测试：纯函数，秒级，不需要服务器
+python3 -m unittest discover tests -v
+
+# 2. 静态自检：文档与配置一致性
 bash preflight.sh
 
-# 第二层/第三层（需要真实部署）
+# 3~4. 需要真实部署
 # 语法层：所有 Python + Shell
 python3 -m py_compile stack/*.py qr_wait.py
 bash -n install.sh verify.sh stack/*.sh
@@ -50,6 +53,18 @@ python3 /opt/dsh/checkall.py      # 106 项，0 失败才算过
    仓库根目录有 `.gitattributes` 强制 `eol=lf`，别删它——Windows 用户 clone 后
    如果换行符被转成 CRLF，部署脚本会直接语法错误。
 7. **不要提交 `deploy.env`**、任何 `.bak-*` 备份、`__pycache__`
+
+## 四之二、改了这些必须跑单元测试
+
+```python
+stack/mem_rank.py     # 遗忘曲线 → tests/test_mem_rank.py
+stack/websurf.py      # SSRF 判定 → tests/test_websurf_ipguard.py
+stack/seer.py         # 路径白名单 → tests/test_seer_paths.py
+stack/llm_shim.py     # 候选切换 → tests/test_llm_shim.py
+```
+
+这四处是**纯函数 + 安全边界**，`checkall.py` 完全覆盖不到。改错了只有跑测试能发现。
+新增同类纯函数时，顺手加一组测试——不需要框架，标准库 `unittest` 就行。
 
 ## 五、代码风格
 

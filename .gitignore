@@ -1,4 +1,6 @@
 # 部署参数（含模型 key，绝不提交）
+.ws_token
+.napcat_webui_token
 deploy.env
 *.env
 !deploy.env.example
