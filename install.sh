@@ -203,9 +203,10 @@ ENVEOF
 umask 022
 ok "qwen.env 写好（600）"
 
-# 7.2 cordis.patch.yml
+# 7.2 cordis.patch.yml（模板里所有占位符都必须被替换，漏一个就起不来）
 sed -e "s|__LLM_BASE_URL__|${LLM_BASE_URL}|g" \
-    -e "s|__LLM_MODEL__|${LLM_MODEL}|g" "$f"
+    -e "s|__LLM_MODEL__|${LLM_MODEL}|g" \
+    -e "s|__WS_TOKEN__|${WS_TOKEN}|g" \
     -e "s|__BOT_QQ__|${BOT_QQ}|g" \
     -e "s|__OWNER_QQ__|${OWNER_QQ}|g" \
     "$STACK/cordis.patch.yml.tpl" > "$DSH_HOME/profiles/web/cordis.patch.yml"
