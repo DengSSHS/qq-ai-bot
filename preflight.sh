@@ -22,11 +22,11 @@ for f in README.md LICENSE NOTICE.md CHANGELOG.md SECURITY.md CONTRIBUTING.md \
          VERSION .gitignore .gitattributes .editorconfig \
          START-HERE.md DEPLOY.md MANUAL.md install.sh verify.sh qr_wait.py \
          deploy.env.example persona/TEMPLATE.md persona/example-jingjing.md \
-         stack/cordis.patch.yml.tpl stack/profile-package.json \
+         stack/cordis.patch.yml.tpl stack/profile-package.json stack/stickerlib.py \
          stack/local-memory/cordis.patch.yml stack/local-memory/package.json \
          scripts/preflight_checks.py \
          tests/test_mem_rank.py tests/test_websurf_ipguard.py \
-         tests/test_seer_paths.py tests/test_llm_shim.py \
+         tests/test_seer_paths.py tests/test_llm_shim.py tests/test_stickerlib.py \
          .github/workflows/ci.yml; do
   [ -e "$f" ] && pass "$f" || fail "missing $f"
 done

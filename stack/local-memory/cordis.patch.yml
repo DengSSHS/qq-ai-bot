@@ -36,6 +36,18 @@
       env:
         # 看图用的多模态端点；不填则用 seer.py 里的默认值
         VISION_BASE: __VISION_BASE__
+  - id: mcp-sticker
+    name: '@deepseek-ai/dsh-mcp-client'
+    config:
+      serverName: sticker
+      transport: stdio
+      command: python3
+      args:
+        - /opt/dsh/stickerlib.py
+      env:
+        # Pillow 是可选的：装了就启用 pHash 感知去重（抓"同一张图的低清版"）。
+        # install.sh 会尝试装到 /opt/dsh/lib（用户态，不动系统 Python）。
+        PYTHONPATH: /opt/dsh/lib
   - id: mcp-admin
     name: '@deepseek-ai/dsh-mcp-client'
     config:
