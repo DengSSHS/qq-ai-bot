@@ -83,7 +83,8 @@ def check_doc_numbers():
                         name = getattr(item.targets[0], "id", "")
                         if name in ("MUST_BLOCK", "MUST_ALLOW"):
                             actual[name] = len(item.value.elts)
-        for f in ("CHANGELOG.md", "README.md"):
+        # 只查 README：CHANGELOG 是历史叙述，必然引用过去的错误值做记录
+        for f in ("README.md",):
             if not os.path.exists(f) or not actual:
                 continue
             text = open(f, encoding="utf-8").read()
@@ -108,7 +109,7 @@ def check_doc_numbers():
             if isinstance(node, ast.FunctionDef) and node.name.startswith("test_"):
                 n_cases += 1
     if n_cases:
-        for f in ("README.md", "CHANGELOG.md"):
+        for f in ("README.md",):
             if not os.path.exists(f):
                 continue
             m = re.search(r"(\d+)\s*个单元测试|新增 `tests/`：(\d+)|(\d+) 个测试", 
