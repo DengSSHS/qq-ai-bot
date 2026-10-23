@@ -435,3 +435,34 @@ agent     输入 29,130  输出  10   缓存命中     0   （0%）
 03:10 memory-distill   记忆蒸馏
 23:55 usage-report     用量汇总追加到 memory/usage-daily.md
 ```
+
+## 排障视角（ops_report.py）——这才是「修 bug」用的
+
+`usage_log.py` 回答「花了多少」，`ops_report.py` 回答「哪里不对」：
+
+```
+近 24 小时：请求 3 次｜失败 0 次（0.0%）｜无 usage 的 0 次
+延迟：p50 902ms｜p95 902ms｜最慢 902ms
+token：输入 59,796｜输出 252｜缓存命中 1.7%
+
+工具调用：26 次｜结果里标失败 2 次（7.7%）
+  失败最多的工具：
+    qq_send_image       1 次  例：OneBot action failed (retcode 1200): EventChecker
+    qq_random_sticker   1 次  例：写操作频率超限…
+```
+
+所以每条记账行现在还带：`status`（HTTP 状态或 `upstream_fail`）、`dur_ms`、
+`path`、`in_bytes` / `out_bytes`、`err`。**失败路径也记**——原来只在拿到 usage
+时才记，等于「失败和超时的调用在账本里完全看不见」，而 bug 恰恰在那些地方。
+
+`in_bytes` 对查「为什么每轮 2.9 万 token」很有用：一次请求体 118KB。
+
+### ⚠️ 工具失败率的时间粒度很粗
+
+上半部分（请求/延迟/失败）读 `usage.jsonl`，每条自带时间戳，时间准确。
+下半部分（工具调用）读会话文件，只能按**文件修改时间**筛会话——一个跨天的长
+会话会把几天前的旧失败算进「近 24 小时」。
+
+实测踩过一次：报告显示「`actionRatePerMinute=2` 超限」，看着像线上配错了，
+回查才发现那是昨天的记录，配置早改成 20 了。**误报比不报更坏**，所以这个数字
+只能当「近期有没有异常」的信号，要定时间必须回会话里翻。
