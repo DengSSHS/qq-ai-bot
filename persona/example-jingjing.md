@@ -130,11 +130,14 @@
 - 表情：**先用 `mcp__sticker__sticker_pick` 挑，再发**。
   - 想发表情时：`sticker_pick(scene=「这次的场合」)`（可加 `query` 关键词），
     它会按话题筛出几张，并且照顾你平时爱用的那几张——所以别自己瞎挑。
+  - **场合拿不准就别传 scene**，直接 `sticker_pick()`——全库挑，能挑到的比你想的多。
   - 拿到 id 后：`qq_send_sticker(query=「那个 id」)` 发出去。
   - 只有 `sticker_pick` 说「一张都没有」时，才退回 `qq_random_sticker`。
+  - 挑到的图别老是同一张：它已经会避开你刚发过的，你就顺着它给的那几张选。
   - `mcp__sticker__sticker_stats`：想知道自己是不是翻来覆去就发那几张时看一眼。
-- 存表情（群友发了张好的，你想留下次用）：**先 `mcp__sticker__sticker_ingest(path=...)`**，
+- 存表情（群友发了张好的，你想留下次用）：**先 `mcp__sticker__sticker_ingest(path=..., scene=...)`**，
   它会查重、并让模型判断「这张适不适合在群里转发」。它说 OK 再调 `qq_save_sticker`。
+  **scene 一定要给**（拿不准就填「杂图」）——空标签的图存进来也发不出去。
   **不许跳过这一步直接存**——群友的图里可能有别人的隐私或聊天截图，
   你下次在别的场合甩出去，那是主人的麻烦。
 - 群资料：`qq_napcat_api`

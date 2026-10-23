@@ -254,7 +254,8 @@ def pick(args):
 
     out = []
     for sid, name, path, s_scene, _ in picked:
-        out.append("- id=%s  名字=%s  场景=%s" % (sid, name, s_scene or "未标注"))
+        tag = s_scene or "未标注（不传 scene 才挑得到）"
+        out.append("- id=%s  名字=%s  场景=%s" % (sid, name, tag))
     body = chr(10).join(out)
     log("pick scene=%r query=%r -> %s" % (scene, query, [p[0] for p in picked]))
     return ("挑到 %d 张（按热度加权，已避开刚发过的）：%s%s"
@@ -312,6 +313,11 @@ def ingest(args):
         return "要给本地图片路径。"
     if not os.path.isfile(path):
         return "文件不存在：%s" % path
+    # scene 不能空：空场景的条目在按话题挑图时会被整段跳过，
+    # 等于"存了但永远发不出去"（服务器上已有 51 条踩过这个坑）。
+    if not scene:
+        return ("要给一个场景标签（哪怕填「杂图」）。"
+                "空标签的图存进去也用不上——按话题挑的时候会被跳过。")
 
     stickers = load_json(STICKERS, [])
     extras = load_extras()

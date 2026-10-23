@@ -124,7 +124,7 @@ class Ingest(Base):
         self.assertIn("已经有了", out)
 
     def test_missing_file(self):
-        out = stickerlib.ingest({"path": "/nope/x.png"})
+        out = stickerlib.ingest({"path": "/nope/x.png", "scene": "杂图"})
         self.assertIn("文件不存在", out)
 
     def test_risky_filename_blocked(self):
@@ -216,6 +216,22 @@ class Ingest(Base):
         # 拿 a（比例 2.0）去比 x1（比例 0.5）——哈希可能一致，但比例差太大
         hit = stickerlib.find_near_duplicate(a, extras, [], threshold=64, ratio_tol=0.02)
         self.assertIsNone(hit, "宽高比差 1.5，不该被判成同一张")
+
+    def test_empty_scene_rejected(self):
+        """空场景必须拒绝——否则存进去永远发不出去（线上有 51 条这种）。"""
+        p = os.path.join(self.tmp, "noscene.png")
+        with open(p, "wb") as f:
+            f.write(b"no-scene-image")
+        out = stickerlib.ingest({"path": p, "safe": True})
+        self.assertIn("场景标签", out)
+
+    def test_untagged_still_pickable_without_scene(self):
+        """未标注的条目，在不传 scene 时应该仍能被挑到（否则等于死库存）。"""
+        # 把 tags 全清空，模拟"未标注"库
+        with open(self.tags_path, "w", encoding="utf-8") as f:
+            json.dump({}, f)
+        out = stickerlib.pick({"n": 1})
+        self.assertIn("id=", out, "全库未标注时应该仍能挑出东西")
 
     def test_no_pil_means_no_phash(self):
         """没装 Pillow 时 pHash 返回 None，不能假装算出来了。"""
