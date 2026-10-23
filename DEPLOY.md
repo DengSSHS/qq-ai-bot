@@ -267,6 +267,32 @@ systemctl restart dsh-onebot
 所以这里专门开了 `allow_private=True`——判定依据是**地址由谁提供**：
 你写在环境变量里的固定地址可以访问内网，模型或群友给的 URL 永远只允许公网。
 
+## 四之三、表情库（可选）
+
+机器人默认没有表情库（`stickers.json` 为空，发图会提示"一张都没有"）。装好之后：
+
+```bash
+# 1. 看家底（库存 / 用过多少 / 场景分布）
+#    通过 QQ 私聊让它调 sticker_stats，或直接跑：
+python3 /opt/dsh/stickerlib.py   # 这是 MCP，手动跑需要喂 JSON，一般不用
+
+# 2. 装 Pillow 才有 pHash 感知去重（可选，装不了也能用，只是少一层近似查重）
+#    项目不装系统包，所以手动解压 wheel 到用户目录：
+mkdir -p /opt/dsh/lib
+curl -fsSL -o /tmp/pil.whl "https://pypi.tuna.tsinghua.edu.cn/packages/.../pillow-10.4.0-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
+python3 -c "import zipfile;zipfile.ZipFile('/tmp/pil.whl').extractall('/opt/dsh/lib')"
+PYTHONPATH=/opt/dsh/lib python3 -c "import PIL;print(PIL.__version__)"
+
+# 3. 存量图回填 pHash + 宽高比（有了 Pillow 才有意义）
+PYTHONPATH=/opt/dsh/lib python3 /opt/dsh/stickerlib.py --backfill
+```
+
+**改 `stickers.json` 之前必须先停服务**：插件在内存里持有条目，会话中会写回，
+不停服删掉的东西会被它恢复。
+
+详细设计说明（为什么加权、为什么 pHash 只提示不拦、参数怎么调）见
+`docs/sticker-library.md`。
+
 ## 五、故障速查（按症状找）
 
 | 症状 | 原因 | 处理 |
