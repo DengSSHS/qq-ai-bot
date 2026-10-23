@@ -73,7 +73,7 @@ def cost_of(model, inp, out, cached):
     return (miss * pin + cached * pcache + out * pout) / 1e6
 
 
-def record(service, model=None, inp=None, out=None, cached=None, meta=None):
+def record(service, model=None, inp=None, out=None, cached=None, meta=None, **extra):
     """记一次调用。任何异常都吞掉——记账绝不能影响主流程。
 
     service: agent / vision / distill / other
@@ -93,6 +93,11 @@ def record(service, model=None, inp=None, out=None, cached=None, meta=None):
         row["cost"] = cost_of(row["model"], row["in"], row["out"], row["cached"])
         if meta:
             row["meta"] = meta
+        # 附加字段（status / dur_ms / err / path / in_bytes / out_bytes / chat …）
+        # 这些是排查用的：出问题时要知道"哪一次、多慢、什么错"，光有 token 不够。
+        for k, v in extra.items():
+            if v is not None:
+                row[k] = v
         line = json.dumps(row, ensure_ascii=False) + chr(10)
         os.makedirs(os.path.dirname(USAGE), exist_ok=True)
         fd = os.open(USAGE, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o644)

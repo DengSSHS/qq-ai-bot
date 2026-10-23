@@ -277,6 +277,7 @@ class Handler(BaseHTTPRequestHandler):
                 key, value = picked_payload()
                 doc[key] = value
                 describe_body(doc)
+                self._model = doc.get("model") if isinstance(doc, dict) else None
                 body = json.dumps(doc, ensure_ascii=False).encode("utf-8")
                 injected = key
             except Exception:
@@ -303,6 +304,14 @@ class Handler(BaseHTTPRequestHandler):
             resp = conn.getresponse()
         except Exception as e:
             log("upstream fail: %s" % e)
+            try:
+                import usage_log
+                usage_log.record("agent", getattr(self, "_model", None),
+                                 status="upstream_fail", dur_ms=int((time.time() - t0) * 1000),
+                                 err=str(e)[:200], path=self.path,
+                                 in_bytes=len(body))
+            except Exception:
+                pass
             msg = json.dumps({"error": {"message": "upstream unreachable: %s" % e}}).encode()
             self.send_response(502)
             self.send_header("Content-Type", "application/json")
@@ -343,9 +352,21 @@ class Handler(BaseHTTPRequestHandler):
                 conn.close()
             except Exception:
                 pass
+            self._req_meta = {"status": resp.status,
+                              "dur_ms": int((time.time() - t0) * 1000),
+                              "path": self.path,
+                              "in_bytes": len(body), "out_bytes": total}
             log("%s %s -> %d  in=%dB out=%dB  %.2fs  inject=%s"
                 % (method, self.path, resp.status, len(body), total,
                    time.time() - t0, injected or "-"))
+            # 拿不到 usage 的请求（非 completion、或上游没回 usage）也要留一行，
+            # 否则"失败了/返回异常"这种情况在账本里完全看不见。
+            if not (is_completion and probe):
+                try:
+                    import usage_log
+                    usage_log.record("agent", getattr(self, "_model", None), **self._req_meta)
+                except Exception:
+                    pass
 
         if is_completion and probe:
             text_probe = probe.decode("utf-8", "replace")
@@ -358,6 +379,15 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     log("USAGE prompt=%s completion=%s cached=%s"
                         % (u.get("prompt"), u.get("completion"), u.get("cached")))
+                try:
+                    import usage_log
+                    meta = getattr(self, "_req_meta", None) or {}
+                    usage_log.record("agent", getattr(self, "_model", None),
+                                     u.get("prompt"), u.get("completion"), u.get("cached"),
+                                     **meta)
+                except Exception:
+                    pass
+
 
     def do_POST(self):
         self._forward("POST")

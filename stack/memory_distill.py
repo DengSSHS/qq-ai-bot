@@ -114,6 +114,17 @@ def _text_call(user, max_tokens=1400):
                  "Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=180) as r:
         d = json.loads(r.read().decode("utf-8", "replace"))
+    try:
+        import usage_log
+        _u = d.get("usage") or {}
+        _det = _u.get("prompt_tokens_details") or {}
+        _cached = _u.get("prompt_cache_hit_tokens")
+        if _cached is None:
+            _cached = _det.get("cached_tokens") if isinstance(_det, dict) else None
+        usage_log.record("distill", seer.MODEL, _u.get("prompt_tokens"),
+                         _u.get("completion_tokens"), _cached)
+    except Exception:
+        pass
     return (d["choices"][0]["message"].get("content") or "").strip()
 
 

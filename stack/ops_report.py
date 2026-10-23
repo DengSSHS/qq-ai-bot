@@ -9,6 +9,13 @@
 为什么要单独一个：修 bug 的时候「今天 12 万 token」没有用，需要的是
 「23:41 那次 upstream 502，耗时 30s」「qq_send_sticker 失败 7 次，全是路径不存在」。
 
+⚠️ 已知限制（别被误报骗了）：
+    上半部分（请求/失败/延迟）读 usage.jsonl，每条带自己的时间戳，**时间准确**。
+    下半部分（工具调用）读会话文件，只能按**文件修改时间**筛会话 —— 一个跨天的
+    长会话文件会把几天前的旧失败一起算进"近 24 小时"。实测踩过：报告显示
+    「actionRatePerMinute=2 超限」，其实那是昨天的记录，配置早已改成 20。
+    所以工具失败率只能当"近期有没有异常"的信号，要定时间得回会话里翻。
+
 用法：
     python3 ops_report.py --hours 24
     python3 ops_report.py --hours 168 --sessions
@@ -118,6 +125,7 @@ def _tool_stats(hours):
                                      timeout=120).stdout.decode("utf-8", "replace")
             except Exception:
                 continue
+            idmap = {}
             for line in raw.split(chr(10)):
                 line = line.strip()
                 if not line.startswith("{"):
@@ -135,12 +143,18 @@ def _tool_stats(hours):
                             n = part.get("name") or "?"
                             calls[n] = calls.get(n, 0) + 1
                             total += 1
+                            # 结果里只带 toolCallId，不带工具名，所以先记下映射
+                            cid = part.get("toolCallId") or part.get("id")
+                            if cid:
+                                idmap[str(cid)] = n
                 elif t == "tool/result":
                     if msg.get("isError"):
                         txt = "".join(str(p.get("text") or "")
                                       for p in (msg.get("content") or [])
                                       if isinstance(p, dict))
-                        n = str(msg.get("toolName") or dd.get("toolName") or "?")
+                        cid = msg.get("toolCallId") or dd.get("toolCallId")
+                        n = str(idmap.get(str(cid)) or msg.get("toolName")
+                                or dd.get("toolName") or "?")
                         fails.setdefault(n, []).append(
                             txt.replace(chr(10), " ")[:90] or "(空)")
     return {"total": total, "calls": calls, "fails": fails}

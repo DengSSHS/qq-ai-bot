@@ -32,7 +32,7 @@ MIME = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
 MAX_BYTES = 8 * 1024 * 1024
 RECENT_WINDOW = 300  # 秒：只认最近收到的图
 ENVF = "/opt/dsh/qwen.env"
-BASE = os.environ.get("VISION_BASE", "https://api.deepseek.com")
+BASE = os.environ.get("VISION_BASE", "https://api.deepseek.com")   # 部署时用环境变量覆盖
 MODEL = os.environ.get("VISION_MODEL", "deepseek-v4.1-flash-1017")
 LOG = "/opt/dsh/memory/vision.log"
 PROTO = "2024-11-05"
@@ -109,6 +109,17 @@ def _ask_model(path, question):
     t0 = time.time()
     with urllib.request.urlopen(req, timeout=120) as r:
         d = json.loads(r.read().decode("utf-8", "replace"))
+    try:
+        import usage_log
+        _u = d.get("usage") or {}
+        _det = _u.get("prompt_tokens_details") or {}
+        _cached = _u.get("prompt_cache_hit_tokens")
+        if _cached is None:
+            _cached = _det.get("cached_tokens") if isinstance(_det, dict) else None
+        usage_log.record("vision", MODEL, _u.get("prompt_tokens"),
+                         _u.get("completion_tokens"), _cached)
+    except Exception:
+        pass
     txt = (d["choices"][0]["message"].get("content") or "").strip()
     log("ask ok %.1fs %s -> %s" % (time.time() - t0, os.path.basename(path), txt[:60]))
     return txt, None
