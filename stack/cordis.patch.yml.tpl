@@ -138,7 +138,7 @@
 
     # --- 频率与预算 ---
     rateLimitPerMinute: 8
-    actionRatePerMinute: 2
+    actionRatePerMinute: 20
     actionRatePerDay: 400
 
     # --- 媒体 ---

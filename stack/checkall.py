@@ -155,7 +155,7 @@ qq = {
     "requireMention": "true", "groupMentionAtOnly": "true",
     "groupActivationMinutes": "10", "groupMuteMinutes": "10",
     "dmPolicy": "allowlist", "rateLimitPerMinute": "8",
-    "actionRatePerMinute": "2", "actionRatePerDay": "400",
+    "actionRatePerMinute": "20", "actionRatePerDay": "400",
     "inboundImageMaxPx": "1024", "sttEnabled": "false",
     "interimMessages": "false", "deferredTimeoutMs": "0",
     "injectEnabled": "true", "injectDryRun": "true",
