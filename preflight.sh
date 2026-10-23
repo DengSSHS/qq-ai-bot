@@ -40,7 +40,8 @@ done < <(grep -oE '\$HERE/[A-Za-z0-9_./-]+|\$STACK/[A-Za-z0-9_./-]+' install.sh 
 
 sec "3. files referenced by docs"
 missing=0
-for doc in README.md DEPLOY.md MANUAL.md START-HERE.md CONTRIBUTING.md SECURITY.md CHANGELOG.md; do
+# CHANGELOG 是历史叙述，必然会提到已删除的文件，不参与引用检查
+for doc in README.md DEPLOY.md MANUAL.md START-HERE.md CONTRIBUTING.md SECURITY.md; do
   while read -r ref; do
     [ -z "$ref" ] && continue
     case "$ref" in http*|/opt/*|./*) continue ;; esac

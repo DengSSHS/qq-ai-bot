@@ -196,8 +196,10 @@ if "[语音]" in p:
     ok("已写语音占位符规则")
 else:
     warn("缺 [语音] 占位符规则")
+# 只检查"正面许可"：以 ❌ 开头的行是反面例子，不算违规
+_positive = [ln for ln in p.splitlines() if not ln.strip().startswith("❌")]
 for forbidden in ("（尾鳍", "尾巴动作", "旁白式动作"):
-    if forbidden in p:
+    if any(forbidden in ln for ln in _positive):
         bad("人设里还有旁白许可：%s" % forbidden)
     else:
         ok("不含旁白许可「%s」" % forbidden)
