@@ -41,6 +41,25 @@
 **教训**：批量文本替换要验证相邻结构，不能只看"目标行删掉了"。
 以后改 install.sh 这类脚本，改完先跑一次模拟渲染（preflight 里已有这项）。
 
+
+### 第 9 条：把「省 token」变成可测数字
+
+`llm_shim` 新增 `USAGE` 日志行：记录每轮的 `prompt` / `completion` / `cached` 和命中率
+（同时支持 DeepSeek 的 `prompt_cache_hit_tokens` 和 OpenAI 的 `prompt_tokens_details.cached_tokens`）。
+
+**跑出来的第一个结论和预期相反**：
+
+```
+USAGE prompt=17771 completion=10 cached=0 (缓存命中 0.0%)
+USAGE prompt=17811 completion=8  cached=0 (缓存命中 0.0%)   # 相隔 16 秒，前缀只差 40 token
+```
+
+在作者这条聚合线路上，**DeepSeek 的 prefix cache 根本没生效**。
+所以 README 成本章节里"缓存能省一半"这个期待被实测否掉了——
+现在写明：除非你自己测出命中 > 0，否则按全价算。
+
+这就是把指标落到日志里的价值：**它推翻了我们自己的乐观假设**。
+
 ### 第三轮审计（外部审查报告）修掉的东西
 
 这次拿到的报告质量最高——每条都指到具体行。核实后：**成立 6 条，不成立 2 条，不适用 1 条**。

@@ -147,6 +147,40 @@ class CandidateSwitching(unittest.TestCase):
         # 回退正则会把它当成"上游在思考"——这是错的，但当前无法区分
         self.assertFalse(self.m._state["ok"])
 
+    def test_usage_deepseek_style(self):
+        """DeepSeek 的 prompt_cache_hit_tokens 要能算命中率。"""
+        import json as _json
+        line = "data: " + _json.dumps({"usage": {
+            "prompt_tokens": 14000, "completion_tokens": 200,
+            "prompt_cache_hit_tokens": 12000}}) + chr(10) + chr(10) + "data: [DONE]" + chr(10)
+        u = self.m.extract_usage(line)
+        self.assertEqual(u["prompt"], 14000)
+        self.assertEqual(u["cached"], 12000)
+        self.assertAlmostEqual(u["hit_rate"], 85.7, places=1)
+
+    def test_usage_openai_style(self):
+        """OpenAI 的 prompt_tokens_details.cached_tokens 也要认。"""
+        import json as _json
+        body = _json.dumps({"usage": {
+            "prompt_tokens": 1000, "completion_tokens": 50,
+            "prompt_tokens_details": {"cached_tokens": 800}}})
+        u = self.m.extract_usage(body)
+        self.assertEqual(u["cached"], 800)
+        self.assertAlmostEqual(u["hit_rate"], 80.0, places=1)
+
+    def test_usage_absent(self):
+        """没有 usage 时返回 None，不能瞎算。"""
+        self.assertIsNone(self.m.extract_usage('{"choices":[{"delta":{"content":"hi"}}]}'))
+
+    def test_usage_partial_fields(self):
+        """只有 prompt 没有缓存字段时，不编造 hit_rate。"""
+        import json as _json
+        body = _json.dumps({"usage": {"prompt_tokens": 500, "completion_tokens": 10}})
+        u = self.m.extract_usage(body)
+        self.assertEqual(u["prompt"], 500)
+        self.assertIsNone(u["cached"])
+        self.assertNotIn("hit_rate", u, "没有缓存数据就不该有命中率")
+
     def test_payload_shape(self):
         """注入的值必须是预期的形状，别在重构时改错。"""
         key, value = self.m.DISABLE_PAYLOADS[0]

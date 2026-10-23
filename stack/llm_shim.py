@@ -94,6 +94,54 @@ def picked_payload():
     return DISABLE_PAYLOADS[idx]
 
 
+def extract_usage(text):
+    """从响应里提取 usage，重点看 prompt 缓存命中。
+
+    不同网关字段名不一样：
+      DeepSeek: prompt_cache_hit_tokens / prompt_cache_miss_tokens
+      OpenAI:   prompt_tokens_details.cached_tokens
+    命中缓存时 input 计费能省一半以上，但以前只能"感觉便宜"——
+    记下来才谈得上优化。
+    """
+    candidates = []
+    for raw in text.split(chr(10)):
+        line = raw.strip()
+        if line.startswith("data:"):
+            line = line[5:].strip()
+        if not line or line == "[DONE]":
+            continue
+        try:
+            obj = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(obj, dict) and isinstance(obj.get("usage"), dict):
+            candidates.append(obj["usage"])
+    if not candidates:
+        try:
+            obj = json.loads(text)
+            if isinstance(obj, dict) and isinstance(obj.get("usage"), dict):
+                candidates.append(obj["usage"])
+        except Exception:
+            pass
+    if not candidates:
+        return None
+    u = candidates[-1]          # 流式最后一个 usage 才是累计值
+    prompt = u.get("prompt_tokens")
+    hit = u.get("prompt_cache_hit_tokens")
+    if hit is None:
+        det = u.get("prompt_tokens_details")
+        if isinstance(det, dict):
+            hit = det.get("cached_tokens")
+    out = {
+        "prompt": prompt,
+        "completion": u.get("completion_tokens"),
+        "cached": hit,
+    }
+    if isinstance(prompt, int) and prompt > 0 and isinstance(hit, int):
+        out["hit_rate"] = round(100.0 * hit / prompt, 1)
+    return out
+
+
 def extract_thinking(text):
     """从响应里提取"思考内容是否非空"。
 
@@ -300,7 +348,16 @@ class Handler(BaseHTTPRequestHandler):
                    time.time() - t0, injected or "-"))
 
         if is_completion and probe:
-            sniff(probe.decode("utf-8", "replace"))   # 收尾判一次（含"生效"的确认）
+            text_probe = probe.decode("utf-8", "replace")
+            sniff(text_probe)                         # 收尾判一次（含"生效"的确认）
+            u = extract_usage(text_probe)
+            if u:
+                if u.get("hit_rate") is not None:
+                    log("USAGE prompt=%s completion=%s cached=%s (缓存命中 %s%%)"
+                        % (u.get("prompt"), u.get("completion"), u.get("cached"), u["hit_rate"]))
+                else:
+                    log("USAGE prompt=%s completion=%s cached=%s"
+                        % (u.get("prompt"), u.get("completion"), u.get("cached")))
 
     def do_POST(self):
         self._forward("POST")
