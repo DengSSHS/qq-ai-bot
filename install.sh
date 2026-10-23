@@ -221,7 +221,13 @@ cp -a "$STACK/local-memory" "$DSH_HOME/profiles/web/local-memory"
 # 看图端点：默认跟随模型线路
 sed -i "s|__VISION_BASE__|${VISION_BASE:-$LLM_BASE_URL}|g"     "$DSH_HOME/profiles/web/local-memory/cordis.patch.yml"
 cd "$DSH_HOME/profiles/web"
-run "$NODE_DIR/bin/npm" install --registry="$NPM_REG" || die "装 profile 依赖失败（网络问题可换 NPM_REG）"
+# --legacy-peer-deps 是必须的，不是图省事：
+#   dsh-onebot-qq 要求 @deepseek-ai/dsh-llm >=0.2.0-rc.1，
+#   而 @deepseek-ai/dsh-mcp-client@0.0.1-rc.1 声明 peer ^0.0.1-rc.1 ——
+#   npm 7+ 严格按 peer 解析会直接 ERESOLVE 拒装。线上这套组合
+#   （dsh-llm 0.2.1-rc.2 + mcp-client 0.0.1-rc.1 + onebot 0.9.3）是能跑的，
+#   所以按线上的实际解析方式装，而不是让 npm 判死刑。
+run "$NODE_DIR/bin/npm" install --legacy-peer-deps --registry="$NPM_REG"     || die "装 profile 依赖失败（网络问题可换 NPM_REG）"
 ok "profile 依赖装好"
 ls node_modules/dsh-onebot-qq >/dev/null 2>&1 && ok "onebot 插件在位" || die "dsh-onebot-qq 没装上"
 

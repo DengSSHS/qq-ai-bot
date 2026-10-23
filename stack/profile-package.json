@@ -4,7 +4,7 @@
   "dependencies": {
     "@deepseek-ai/dsh-mcp-client": "0.0.1-rc.1",
     "@stardustlc/dsh-dream": "^0.10.0",
-    "dsh-onebot-qq": "^0.9.3",
+    "dsh-onebot-qq": "0.9.3",
     "local-memory": "file:./node_modules/local-memory"
   },
   "dsh": {

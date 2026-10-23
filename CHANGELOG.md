@@ -2,6 +2,59 @@
 
 本项目按「改了什么 + 为什么」记录，不按版本号堆功能。所有日期为实际改动日期。
 
+## v0.2.1 — 2026-10-24 · 修复全新安装失败（v0.2.0 装不上）
+
+**v0.2.0 在干净机器上是装不上的。** 这一版只修这个，没有新功能。
+
+### 症状
+
+在 Ubuntu 24.04 容器里从零跑 `install.sh`，1~6 阶段全过，第 7 阶段装 profile
+依赖时 npm 直接拒装：
+
+```
+npm error ERESOLVE could not resolve
+Found: @deepseek-ai/dsh-llm@0.0.1-rc.5
+Conflicting peer dependency: @deepseek-ai/dsh-llm@0.2.0-rc.2
+  peer ... from dsh-onebot-qq@0.9.3
+```
+
+### 根因
+
+`dsh-onebot-qq` 要求 `@deepseek-ai/dsh-llm >=0.2.0-rc.1`，而
+`@deepseek-ai/dsh-mcp-client@0.0.1-rc.1` 声明 peer `^0.0.1-rc.1` —— 两条要求
+在 npm 7+ 的严格 peer 解析下无法同时满足，直接判定冲突。**但线上这套组合
+（dsh-llm 0.2.1-rc.2 + mcp-client 0.0.1-rc.1 + onebot 0.9.3）一直跑得好好的**，
+说明它是被 `--legacy-peer-deps` 装进去的，只是这个参数没写进脚本。
+
+### 修法
+
+- `install.sh` 的 profile 依赖安装加 `--legacy-peer-deps`，并在注释里写清为什么
+  必须加（不是图省事，是唯一能复现线上已验证组合的路径）
+- `dsh-onebot-qq` 从 `^0.9.3` 钉死为 `0.9.3`。`^` 会拉到 0.9.5，而 0.9.5 对
+  上游 peer 的要求更高，解析必炸
+
+### 顺带修掉的
+
+改 `install.sh` 时用文本模式写盘，在 Windows 上把 `
+` 写成了 `
+`，
+容器里 bash 直接报 `syntax error near unexpected token 'in'`。
+已统一为 LF（preflight 里有专门检查这条）。
+
+### 干净环境验证结果
+
+Ubuntu 24.04 容器、空目录、只放 `deploy.env`：
+
+```
+1/9 前置检查      OK      5/9 dsh 0.2.1-rc.2  OK
+2/9 系统依赖      OK      6/9 代码部署         OK
+3/9 Docker        OK      7/9 配置+依赖+插件   OK
+4/9 Node v24.22.0 OK
+```
+
+第 8/9 阶段（NapCat 容器、systemd 服务）在容器里无法验证——前者需要真实
+docker 守护进程（用 shim 顶替），后者需要 systemd。这两段仍以线上运行为准。
+
 ## v0.2.0 — 2026-10-24 · 记忆能学了、账能查了、缓存修好了
 
 这一版不在功能数量，在**三个"存了但没用上"的死角**：表情收了没人取、记忆写了
