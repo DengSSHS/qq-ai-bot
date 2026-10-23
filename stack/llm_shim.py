@@ -94,6 +94,51 @@ def picked_payload():
     return DISABLE_PAYLOADS[idx]
 
 
+def extract_thinking(text):
+    """从响应里提取"思考内容是否非空"。
+
+    优先按 SSE / JSON 结构解析：只看 choices[].delta / choices[].message 里
+    以及顶层的思考字段，**不扫响应正文**。这样机器人讨论"reasoning_content
+    这个字段"时不会被误判（裸正则的毛病）。
+    结构解析失败（网关格式特殊）时回退到正则，并标记 unparsed=True。
+    返回 (有非空思考, 是否结构化解析成功)。
+    """
+    saw_field = False
+    for raw in text.split(chr(10)):
+        line = raw.strip()
+        if line.startswith("data:"):
+            line = line[5:].strip()
+        if not line or line == "[DONE]":
+            continue
+        try:
+            obj = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        holders = []
+        for ch in (obj.get("choices") or []):
+            if isinstance(ch, dict):
+                holders.append(ch.get("delta"))
+                holders.append(ch.get("message"))
+        holders.append(obj)
+        for holder in holders:
+            if not isinstance(holder, dict):
+                continue
+            for key in ("reasoning_content", "reasoning_text", "reasoning", "thinking"):
+                val = holder.get(key)
+                if isinstance(val, str):
+                    saw_field = True
+                    if val.strip():
+                        return True, True
+    if saw_field:
+        return False, True
+    # 一行都没解析出结构：可能不是 SSE（比如纯命令行回显），退正则
+    if RE_NONEMPTY.search(text):
+        return True, False
+    return False, False
+
+
 def sniff(text):
     """根据一次响应碎片判断注入是否生效。
 
@@ -105,9 +150,10 @@ def sniff(text):
     另一件事：思考被真正关掉时，很多网关**根本不返回这些字段**（而不是返回空串），
     所以"没有该字段"也要视为生效，否则永远确认不了。
     """
+    has_thinking, structured = extract_thinking(text)
     msg = None
     with _state_lock:            # 读-改-写必须原子，服务是多线程的
-        if RE_NONEMPTY.search(text):
+        if has_thinking:
             _state["ok"] = False
             _state["fails"] += 1
             if _state["idx"] < len(DISABLE_PAYLOADS) - 1:
@@ -236,10 +282,8 @@ class Handler(BaseHTTPRequestHandler):
                 total += len(chunk)
                 if len(probe) < 131072:
                     probe.extend(chunk[:131072 - len(probe)])
-                    # 边转发边判：长响应里思考可能在中间，不只末尾
-                    if not probed and len(probe) and RE_NONEMPTY.search(
-                            probe.decode("utf-8", "replace")):
-                        probed = True
+                    # 不在转发中途判：中途只能用正则（会误判正文），
+                    # 统一留到响应结束按结构解析
                 self.wfile.write(b"%x\r\n" % len(chunk) + chunk + b"\r\n")
                 self.wfile.flush()
             self.wfile.write(b"0\r\n\r\n")

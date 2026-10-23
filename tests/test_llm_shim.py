@@ -103,6 +103,50 @@ class CandidateSwitching(unittest.TestCase):
         self.assertLessEqual(self.m._state["idx"], len(self.m.DISABLE_PAYLOADS) - 1)
         self.assertGreaterEqual(self.m._state["idx"], 0)
 
+    def test_body_discussing_field_not_misjudged(self):
+        """正文里谈论这些字段名时，不能被误判成上游在思考。
+
+        诚实说明：在标准 JSON/SSE 响应里，正文的引号会被转义成 \"，
+        裸正则要求裸引号，所以**其实匹配不上**——这条误判风险比看起来小。
+        改成结构化解析是为了不依赖这个巧合（网关若返回非严格 JSON 就会露）。
+        """
+        import json as _json
+        body = _json.dumps({
+            "choices": [{"delta": {
+                "content": '这个字段叫 "reasoning_content": "示例" ，用它判断思考'
+            }}]
+        }, ensure_ascii=False)
+        self.m.sniff(body)
+        self.assertTrue(self.m._state["ok"], "正文提到字段名不应被判为上游仍在思考")
+        self.assertEqual(self.m._state["fails"], 0)
+        self.assertEqual(self.m._state["idx"], 0, "不应因此切换候选")
+
+    def test_structured_sse_nonempty(self):
+        """标准 SSE 结构里的非空思考 → 判定失效并切换。"""
+        self.m.sniff('data: {"choices":[{"delta":{"reasoning_content":"我真的在想"}}]}')
+        self.assertFalse(self.m._state["ok"])
+        self.assertEqual(self.m._state["idx"], 1)
+
+    def test_structured_sse_empty(self):
+        """标准 SSE 结构里的空思考 → 判定生效。"""
+        self.m.sniff('data: {"choices":[{"delta":{"reasoning_content":"","content":"好"}}]}')
+        self.assertTrue(self.m._state["ok"])
+
+    def test_top_level_reasoning(self):
+        """有些网关把思考放顶层，不是 choices[].delta。"""
+        self.m.sniff('data: {"reasoning_content":"顶层思考"}')
+        self.assertFalse(self.m._state["ok"], "顶层思考字段也要识别")
+
+    def test_non_json_fallback_is_a_known_gap(self):
+        """非 JSON 响应（网关异常、纯文本回显）时只能回退正则——这是已知局限。
+
+        这种情况信息不足：既拿不到 choices 结构，也分不清"思考内容"和"正文里
+        引用了这个字段名"。记录在这里，免得以后误以为全覆盖。
+        """
+        self.m.sniff('some plain text: "reasoning_content": "x"')
+        # 回退正则会把它当成"上游在思考"——这是错的，但当前无法区分
+        self.assertFalse(self.m._state["ok"])
+
     def test_payload_shape(self):
         """注入的值必须是预期的形状，别在重构时改错。"""
         key, value = self.m.DISABLE_PAYLOADS[0]

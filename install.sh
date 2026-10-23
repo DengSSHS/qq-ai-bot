@@ -22,6 +22,7 @@ DSH_VER="${DSH_VER:-0.2.1-rc.2}"
 NPM_REG="${NPM_REG:-https://registry.npmmirror.com}"
 NODE_MIRROR="${NODE_MIRROR:-https://registry.npmmirror.com/-/binary/node}"
 LOG="/var/log/qqbot-install.log"
+(umask 077; touch "$LOG" 2>/dev/null; chmod 600 "$LOG" 2>/dev/null) || true
 
 C_R=$'\033[31m'; C_G=$'\033[32m'; C_Y=$'\033[33m'; C_0=$'\033[0m'
 say()  { printf '%s\n' "$*"; }
@@ -157,8 +158,7 @@ chmod +x "$DSH_HOME"/*.sh 2>/dev/null
 for f in "$DSH_HOME"/*.py "$DSH_HOME"/*.sh; do
   [ -f "$f" ] || continue
   sed -i -e "s|__BOT_QQ__|${BOT_QQ}|g" \
-         -e "s|__OWNER_QQ__|${OWNER_QQ}|g" \
-         -e "s|__WS_TOKEN__|${WS_TOKEN}|g" "$f"
+         -e "s|__OWNER_QQ__|${OWNER_QQ}|g" "$f"
 done
 mkdir -p "$DSH_HOME/media/onebot"
 # 人设：按 PERSONA_MODE 落地
@@ -205,8 +205,7 @@ ok "qwen.env 写好（600）"
 
 # 7.2 cordis.patch.yml
 sed -e "s|__LLM_BASE_URL__|${LLM_BASE_URL}|g" \
-    -e "s|__LLM_MODEL__|${LLM_MODEL}|g" \
-    -e "s|__WS_TOKEN__|${WS_TOKEN}|g" \
+    -e "s|__LLM_MODEL__|${LLM_MODEL}|g" "$f"
     -e "s|__BOT_QQ__|${BOT_QQ}|g" \
     -e "s|__OWNER_QQ__|${OWNER_QQ}|g" \
     "$STACK/cordis.patch.yml.tpl" > "$DSH_HOME/profiles/web/cordis.patch.yml"
@@ -291,6 +290,12 @@ repo_digest=$(docker inspect napcat --format '{{index .RepoDigests 0}}' 2>/dev/n
 if [ -n "$repo_digest" ]; then
   ok "NapCat 镜像: ${repo_digest}"
   ok "  想锁定版本：把这一整串写进 deploy.env 的 NAPCAT_IMAGE=，下次就不会随 latest 变"
+  # 既然已经拿到了，就自动锁上——这个项目会被风控踢号、需要重装，
+  # 可复现性比"追新"重要。想追新把 deploy.env 改回 :latest 即可。
+  if [ -f "$HERE/deploy.env" ] && grep -qE '^NAPCAT_IMAGE=.*:latest' "$HERE/deploy.env"; then
+    sed -i "s|^NAPCAT_IMAGE=.*|NAPCAT_IMAGE=${repo_digest}|" "$HERE/deploy.env"
+    ok "  已自动锁进 deploy.env（想追新就改回 :latest）"
+  fi
 else
   warn "拿不到 RepoDigests（本地 build 的镜像没有），无法给可锁定的 digest"
 fi
@@ -365,8 +370,37 @@ systemctl enable --now dsh-onebot.service   >>"$LOG" 2>&1 || warn "dsh-onebot �
 systemctl enable --now proactive.timer      >>"$LOG" 2>&1 || warn "proactive.timer 启动失败"
 systemctl enable --now body-state.timer     >>"$LOG" 2>&1 || warn "body-state.timer 启动失败"
 systemctl enable --now toolmode.path        >>"$LOG" 2>&1 || warn "toolmode.path 启动失败"
+
 sleep 8
 systemctl is-active --quiet dsh-onebot && ok "dsh-onebot 运行中" || die "dsh-onebot 没起来：journalctl -u dsh-onebot -n 50"
+
+# ── 日志轮转（不配这个，长跑几个月必被日志咬一次）────────────────────
+# copytruncate 是必须的：dsh-onebot 和 llm-shim 都以 append 方式持有句柄，
+# 直接 rename 会让它们继续写旧 inode。
+cat > /etc/logrotate.d/qqbot <<'ROTEOF'
+/var/log/dsh-onebot.log /var/log/qqbot-install.log /var/log/llm-shim.log {
+    weekly
+    rotate 4
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    su root root
+}
+/opt/dsh/memory/*.log {
+    weekly
+    rotate 4
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    su root root
+}
+ROTEOF
+chmod 644 /etc/logrotate.d/qqbot
+ok "日志轮转已配置（每周、留 4 份、压缩）"
 
 # ── 验收 ──────────────────────────────────────────────────────────────
 phase "部署完成 · 自检"
@@ -392,7 +426,8 @@ cat <<TIPEOF
    改模型   $DSH_HOME/profiles/web/cordis.patch.yml 改完 systemctl restart dsh-onebot
 
 本次生成的密钥（记下来）：
-   OneBot access token : ${WS_TOKEN}
-   NapCat WebUI token  : ${NAPCAT_WEBUI_TOKEN}
+   OneBot access token : 见 ${HERE}/.ws_token（600）
+   NapCat WebUI token  : 见 ${HERE}/.napcat_webui_token（600）
+   （故意不打印明文，避免落进安装日志）
 ------------------------------------------------------------------
 TIPEOF
