@@ -320,8 +320,22 @@ class Hamming(unittest.TestCase):
         self.assertEqual(stickerlib.hamming("0000000000000000", "0000000000000001"), 1)
 
     def test_garbage_is_far(self):
-        """解析失败时返回 64（当成完全不同），不要谎报"一样"。"""
-        self.assertEqual(stickerlib.hamming("zz", "yy"), 64)
+        """解析失败时返回一个大值（当成完全不同），不要谎报"一样"。"""
+        self.assertGreater(stickerlib.hamming("zz", "yy"), 1000)
+
+    def test_different_length_is_far(self):
+        """8x8 的旧值和 16x16 的新值不能比——zip 截断会算出假的"很近"。
+
+        升级 PHASH_SIZE 后 extras.json 里会同时存在两种长度的值。
+        不做长度校验的话："ffff" 和 "ffff000000000000" 会算出距离 0。
+        """
+        self.assertGreater(
+            stickerlib.hamming("ffff0000ffff0000", "ffff0000ffff0000" * 4), 1000)
+
+    def test_phash_is_fixed_width(self):
+        """phash 必须定长，否则长度校验和比较都失效。"""
+        self.assertEqual(stickerlib.PHASH_SIZE, 16)
+        self.assertEqual((stickerlib.PHASH_SIZE ** 2 + 3) // 4, 64)
 
 
 class TriageReplyParsing(unittest.TestCase):
@@ -459,3 +473,97 @@ class SettleSkipsExisting(unittest.TestCase):
         self.assertIn("库", out)
         self.assertFalse(os.path.isdir(stickerlib.PENDING)
                          and os.listdir(stickerlib.PENDING), "不该进 pending")
+
+
+class NearDuplicateBlocksIngest(unittest.TestCase):
+    """近似重复改成「默认拦」之后的行为（可用 force 强收）。
+
+    为什么改：8x8 的 phash 在这个库上误拦率 0.123%，抽出来看全是不同的图
+    （初音命中袋鼠、鲸鱼娘-118 命中鲸鱼娘-070），所以只敢提示。换 16x16
+    后同一批样本降到 0.004%，而「同图不同压缩」召回不变（q50/q80/q95/
+    缩50%/缩75% 全部距离 <=2）。库已经 4244 张，收进重复图的代价比误挡
+    一张新图高，所以默认改成拦，但留 force 出口。
+    """
+
+    def setUp(self):
+        if not stickerlib.HAS_PIL:
+            self.skipTest("没装 Pillow，算不出 phash")
+        self.tmp = tempfile.mkdtemp()
+        self._saved = (stickerlib.STICKERS, stickerlib.EXTRAS,
+                       stickerlib.TAGS, stickerlib.MEDIA_DIR)
+        stickerlib.STICKERS = os.path.join(self.tmp, "stickers.json")
+        stickerlib.EXTRAS = os.path.join(self.tmp, "extras.json")
+        stickerlib.TAGS = os.path.join(self.tmp, "tags.json")
+        stickerlib.MEDIA_DIR = self.tmp
+
+    def tearDown(self):
+        (stickerlib.STICKERS, stickerlib.EXTRAS,
+         stickerlib.TAGS, stickerlib.MEDIA_DIR) = self._saved
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _make_pair(self):
+        """造一张原图和它压缩过的版本（sha256 不同、看起来一样）。"""
+        from PIL import Image
+        rnd = __import__("random").Random(7)
+        im = Image.new("RGB", (160, 160))
+        px = im.load()
+        for y in range(160):
+            for x in range(160):
+                # 造点有结构的图案，纯色图的 phash 会退化
+                px[x, y] = ((x * 3 + y * 2) % 256, (x ^ y) % 256, (x * 7) % 256)
+        a = os.path.join(self.tmp, "orig.png")
+        b = os.path.join(self.tmp, "recompressed.jpg")
+        im.save(a, "PNG")
+        im.save(b, "JPEG", quality=60)
+        return a, b
+
+    def test_near_duplicate_is_blocked(self):
+        orig, var = self._make_pair()
+        ph = stickerlib.phash(orig)
+        self.assertTrue(ph, "原图应该算得出 phash")
+        with open(stickerlib.STICKERS, "w", encoding="utf-8") as f:
+            json.dump([{"id": "orig1", "hash": "not-the-same-bytes",
+                        "name": "原图", "file": orig}], f)
+        with open(stickerlib.EXTRAS, "w", encoding="utf-8") as f:
+            json.dump({"orig1": {"phash": ph,
+                                 "ratio": stickerlib.image_ratio(orig)}}, f)
+        out = stickerlib.ingest({"path": var, "scene": "杂图", "safe": True})
+        self.assertIn("很像", out)
+        self.assertIn("force", out)
+        self.assertIn("原图", out)
+
+    def test_force_overrides_block(self):
+        orig, var = self._make_pair()
+        ph = stickerlib.phash(orig)
+        with open(stickerlib.STICKERS, "w", encoding="utf-8") as f:
+            json.dump([{"id": "orig1", "hash": "x", "name": "原图", "file": orig}], f)
+        with open(stickerlib.EXTRAS, "w", encoding="utf-8") as f:
+            json.dump({"orig1": {"phash": ph,
+                                 "ratio": stickerlib.image_ratio(orig)}}, f)
+        out = stickerlib.ingest({"path": var, "scene": "杂图",
+                                 "safe": True, "force": True})
+        self.assertNotIn("很像", out)
+        self.assertIn("已记录", out)
+
+    def test_different_images_not_blocked(self):
+        """两张内容不同的图不该被互拦（16x16 下同批次不同图几乎不命中）。"""
+        from PIL import Image
+        a = os.path.join(self.tmp, "a.png")
+        b = os.path.join(self.tmp, "b.png")
+        im1 = Image.new("RGB", (120, 120), (10, 20, 30))
+        im2 = Image.new("RGB", (120, 120), (250, 240, 200))
+        for im, base in ((im1, 0), (im2, 128)):
+            px = im.load()
+            for y in range(120):
+                for x in range(120):
+                    px[x, y] = ((x * 2 + base) % 256, (y * 2 + base) % 256, base)
+        im1.save(a); im2.save(b)
+        ph = stickerlib.phash(a)
+        with open(stickerlib.STICKERS, "w", encoding="utf-8") as f:
+            json.dump([{"id": "a1", "hash": "x", "name": "A", "file": a}], f)
+        with open(stickerlib.EXTRAS, "w", encoding="utf-8") as f:
+            json.dump({"a1": {"phash": ph,
+                              "ratio": stickerlib.image_ratio(a)}}, f)
+        out = stickerlib.ingest({"path": b, "scene": "杂图", "safe": True})
+        self.assertNotIn("很像", out, "内容不同的图不该被当成重复")

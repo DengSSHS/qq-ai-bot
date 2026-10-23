@@ -82,14 +82,35 @@ def load_extras():
 
 
 # ── 感知哈希（可选）────────────────────────────────────────────────────
-def phash(path, size=8, highfreq_factor=4):
+# 感知哈希的分辨率：16x16 = 256 bit。
+#
+# 为什么不是默认的 8x8（实测，2026-10-24）：
+#   这个库的图多为纯色底、大头、构图简单，8x8 的 DCT 低频特征容易退化。
+#   抽 300 张跑 44850 对，d<=2 且比例一致的有 55 对（0.123%），抽出来看
+#   全是不同的图：「初音-188」命中「袋鼠-ResizedImage」，「鲸鱼娘-118」命中
+#   「鲸鱼娘-070」，还有一张「鲸鱼娘-186」同时命中 6 张不同的图——它的
+#   phash 退化了，跟谁都“像”。
+#   换 16x16 后同一批样本只剩 2 对（0.004%，降到 1/30），而「同图不同压缩/
+#   缩放」的召回率没变：q50/q80/q95/缩 50%/缩 75% 五种变体，40 张图全部
+#   在距离 <=2 内抓到（8x8 也是 100%）。
+#   结论：16x16 白拿一个数量级的精度，不漏判。
+PHASH_SIZE = 16
+
+
+def phash(path, size=None, highfreq_factor=4):
     """感知哈希（DCT 版）。没有 Pillow 时返回 None。
 
     用途：抓"同一张图的不同压缩/分辨率版本"。sha256 抓不到这种，
     因为它们字节不同。
+
+    返回定长十六进制串（size×size 位 / 4）。**长度必须固定**：
+    早期用 "%016x" 写死 16 个字符，一旦调大 size 就会丢高位零、
+    长度不固定，跟定长旧值比较时 hamming 会 zip 截断出完全错误的距离。
     """
     if not HAS_PIL:
         return None
+    if size is None:
+        size = PHASH_SIZE
     try:
         import math
         img_size = size * highfreq_factor
@@ -114,16 +135,25 @@ def phash(path, size=8, highfreq_factor=4):
         low = [dct[y][x] for y in range(size) for x in range(size)]
         avg = sum(low) / len(low)
         bits = "".join("1" if v > avg else "0" for v in low)
-        return "%016x" % int(bits, 2)
+        return "%0*x" % ((size * size + 3) // 4, int(bits, 2))
     except Exception:
         return None
 
 
 def hamming(a, b):
+    """汉明距离。算不出或位数不一致时返回一个足够大的值（当成完全不同）。
+
+    位数校验不是防御性写法，是必需的：extras.json 里可能同时存在用不同
+    size 算的 phash（升级 PHASH_SIZE 后的新旧值）。直接 int() 异或的话，
+    短的那边会被 zip 截断，算出"很像"的假距离。
+    """
+    a, b = str(a or ""), str(b or "")
+    if not a or not b or len(a) != len(b):
+        return 1 << 20          # 远超任何阈值，不会被当成重复
     try:
         return bin(int(a, 16) ^ int(b, 16)).count("1")
     except Exception:
-        return 64
+        return 1 << 20
 
 
 def image_ratio(path):
@@ -334,14 +364,21 @@ def ingest(args):
                     "直接 qq_send_sticker(query=%s) 就能发。"
                     % (s.get("id"), s.get("name"), s.get("id")))
 
-    # ② 近似重复：只提示，不拦（见 find_near_duplicate 里的实测教训）
+    # ② 近似重复：命中就拦（可用 force=true 强收）。
+    #
+    #    以前是“只提示不拦”，因为 8x8 的 phash 在这个库上误拦率 0.123%（抽
+    #    300 张 / 44850 对，55 对命中全是不同的图：初音命中袋鼠、鲸鱼娘-118
+    #    命中鲸鱼娘-070）。换 16x16 后同一批样本只剩 2 对（0.004%），而“同图
+    #    不同压缩/缩放”的召回没变。库已经 4244 张了，收进一张重复图的代价比
+    #    误挡一张新图高——所以默认改成拦，但留 force 出口。
     near = find_near_duplicate(path, extras, stickers)
-    near_note = ""
-    if near:
+    if near and not args.get("force"):
         sid, dist = near
-        near_note = (chr(10) + "注意：图库里的 id=%s 和这张很像（感知哈希差 %d 位、"
-                     "宽高比也一致），可能是同一张的不同清晰度版本。"
-                     "你要是想省空间就别存了；不确定就存着。" % (sid, dist))
+        nm = next((x.get("name") for x in stickers if x.get("id") == sid), sid)
+        return ("这张和库里已有的很像（id=%s 名字=%s，感知哈希只差 %d 位），"
+                "按同一张图处理，不入库。%s"
+                "确实是另一张图（同系列但内容不同）就再调一次，传 force=true。"
+                % (sid, nm, dist, chr(10)))
 
     # ③ 安全预筛：让模型看一眼，不问关键词。
     #    拿不到判断就**不入库**——赌输一次是它在别的场景甩出别人的隐私。
@@ -374,8 +411,6 @@ def ingest(args):
         % (os.path.basename(path), scene, safe, extras[sid].get("phash") or "-"))
 
     msg = ["已记录：id=%s 场景=%s 安全=%s" % (sid, scene or "未标注", verdict)]
-    if near_note:
-        msg.append(near_note)
     if safe is False:
         msg.append("标为不适合转发 → 已入库但不参与挑图（防止它在别的场景被甩出去）。")
     if not HAS_PIL:
@@ -456,7 +491,9 @@ TOOLS = [
         "name": "sticker_ingest",
         "description": ("把一张图记进表情库的附加层（不替代插件的 qq_save_sticker）。"
                         "入库前会查重（sha256 精确 + pHash 近似）和做安全预筛，"
-                        "不适合转发的只留记录、不参与挑图。"),
+                        "不适合转发的只留记录、不参与挑图。"
+                        "pHash 近似命中会直接拒收（防止同图不同版本灌进来），"
+                        "确实是另一张图就传 force=true。"),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -464,6 +501,8 @@ TOOLS = [
                 "scene": {"type": "string", "description": "场景标签"},
                 "safe": {"type": "boolean", "description": "是否适合转发（省略则按关键词粗判）"},
                 "ocr": {"type": "string", "description": "图上文字，用于安全粗判"},
+                "force": {"type": "boolean",
+                          "description": "跳过近似重复拦截（确实和库里那张不是同一张才用）"},
             },
             "required": ["path"],
         },
@@ -952,7 +991,9 @@ def backfill(limit=0):
 
     为什么需要：pHash 只能在图片能解码时算。库里的 4000+ 张是早先入库的，
     没有这个字段——不回填的话，"新图入库时查近似重复"就没东西可比。
-    断点续跑：已算过的跳过。
+    断点续跑：已算过的跳过。**但长度不对的不算「算过」**——升级 PHASH_SIZE
+    后（8x8 → 16x16），旧值位数不同，跟新值比会直接返回「完全不同」，
+    等于判重静默失效。所以这里按期望长度校验，自动重算旧格式。
     """
     stickers = load_json(STICKERS, [])
     extras = load_extras()
@@ -960,12 +1001,14 @@ def backfill(limit=0):
         print("stickers.json 为空")
         return 1
     total = len(stickers)
+    want_len = (PHASH_SIZE * PHASH_SIZE + 3) // 4
     def _incomplete(s):
         if not isinstance(s, dict) or not s.get("file"):
             return False
         m = extras.get(s.get("id"), {})
         # phash 和 ratio 都要有：只有 phash 时判重会因缺比例而永远不敢判
-        return not m.get("phash") or m.get("ratio") is None
+        return (not m.get("phash") or len(m.get("phash") or "") != want_len
+                or m.get("ratio") is None)
     todo = [s for s in stickers if _incomplete(s)]
     print("总数 %d，待回填 %d，已算 %d" % (total, len(todo), total - len(todo)))
     if limit:
