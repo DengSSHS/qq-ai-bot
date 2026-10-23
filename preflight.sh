@@ -24,6 +24,9 @@ for f in README.md LICENSE NOTICE.md CHANGELOG.md SECURITY.md CONTRIBUTING.md \
          deploy.env.example persona/TEMPLATE.md persona/example-jingjing.md \
          stack/cordis.patch.yml.tpl stack/profile-package.json \
          stack/local-memory/cordis.patch.yml stack/local-memory/package.json \
+         scripts/preflight_checks.py \
+         tests/test_mem_rank.py tests/test_websurf_ipguard.py \
+         tests/test_seer_paths.py tests/test_llm_shim.py \
          .github/workflows/ci.yml; do
   [ -e "$f" ] && pass "$f" || fail "missing $f"
 done

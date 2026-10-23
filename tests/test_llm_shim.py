@@ -67,6 +67,42 @@ class CandidateSwitching(unittest.TestCase):
         finally:
             del self.m.os.environ["SHIM_DISABLE_FIELD"]
 
+    def test_concurrent_sniff_no_lost_update(self):
+        """多线程同时判定失败，fails 计数不能丢。
+
+        服务是 ThreadingHTTPServer，_state 是共享字典。`+=` 是读-改-写三步，
+        理论上不加锁会丢更新。
+
+        **诚实说明**：在 CPython 的 GIL 下，这个用例实测抓不住去锁的情况
+        （竞态窗口太窄）。它的价值是底线检查 + 记录这个约束存在，
+        不能当作"锁已被证明有效"的证据。要真验证得在 free-threaded 构建上跑。
+        """
+        import threading
+        N = 20
+        payload = '{"choices":[{"delta":{"reasoning_content":"还在想"}}]}'
+        threads = [threading.Thread(target=self.m.sniff, args=(payload,))
+                   for _ in range(N)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(self.m._state["fails"], N,
+                         "并发 %d 次失败应该正好记 %d 次，实际 %d（锁丢了？）"
+                         % (N, N, self.m._state["fails"]))
+
+    def test_concurrent_no_index_overshoot(self):
+        """并发切换候选时，idx 不能越界。"""
+        import threading
+        payload = '{"choices":[{"delta":{"reasoning_content":"想"}}]}'
+        threads = [threading.Thread(target=self.m.sniff, args=(payload,))
+                   for _ in range(10)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertLessEqual(self.m._state["idx"], len(self.m.DISABLE_PAYLOADS) - 1)
+        self.assertGreaterEqual(self.m._state["idx"], 0)
+
     def test_payload_shape(self):
         """注入的值必须是预期的形状，别在重构时改错。"""
         key, value = self.m.DISABLE_PAYLOADS[0]

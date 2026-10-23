@@ -35,11 +35,12 @@ bash -n install.sh verify.sh stack/*.sh
 
 # 运行层：真实部署上跑
 bash verify.sh                    # 15 项，最后一行 VERDICT
-python3 /opt/dsh/checkall.py      # 106 项，0 失败才算过
+python3 /opt/dsh/checkall.py      # 约 100 项（浮动），0 失败才算配置没坏
 ```
 
-**改了任何东西，`checkall.py` 必须 0 失败。** 它不是可有可无的装饰——它是这套代码的
-验收标准，会把「配置期望值」和「实际值」逐项对比。
+**改了任何东西，`checkall.py` 必须 0 失败。** 但别把它当验收标准：
+它逐项比对「配置期望值 vs 实际值」，属于配置自检。**改了业务逻辑它发现不了**——
+那要靠 `tests/` 的单元测试和最后一层人验。
 
 ## 四、硬规矩
 

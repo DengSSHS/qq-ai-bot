@@ -17,7 +17,8 @@ DSH 的 provider 配置里 `reasoning: "off"` 表达的是"不指定档位"，�
 --------------
 不同网关认的字段不一样，所以这里**不假定第一个能生效**：
 转发响应时嗅探有没有产生 reasoning_content，没关掉就自动换下一个候选字段；
-全部候选都失败会打 ERROR 日志，不会静默失效。
+全部候选都失败会打 ERROR 日志。但注意局限：只认 4 个常见键名、只嗅前 128KB，
+其他键名或超长响应仍然漏（详见 sniff() 的注释）。
 
 想强制指定字段：环境变量 SHIM_DISABLE_FIELD=thinking 或 enable_thinking
 
@@ -39,6 +40,7 @@ import os
 import re
 import ssl
 import sys
+import threading
 import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -61,11 +63,16 @@ _state = {
     "fails": 0,
     "last_alarm": 0.0,
 }
+# ThreadingHTTPServer 每个请求一个线程，_state 是共享的：读-改-写必须加锁，
+# 否则两个并发失败会让 idx 少加一次（或状态错乱），半夜很难查。
+_state_lock = threading.Lock()
 
-# 响应里"思考内容非空" / "思考内容为空" 的特征
-RE_NONEMPTY = re.compile(r'"reasoning_content"\s*:\s*"[^"]+"')
-RE_EMPTY = re.compile(r'"reasoning_content"\s*:\s*""')
-RE_HAS_FIELD = re.compile(r'"reasoning_content"')
+# 响应里"思考内容非空"的特征。
+# 已知字段名不止一个：DeepSeek 系用 reasoning_content，有的网关用 reasoning /
+# reasoning_text / thinking。只认一个名字等于把"静默失效"换成更小的概率——所以都认。
+_THINK_KEYS = r'(?:reasoning_content|reasoning_text|reasoning|thinking)'
+RE_NONEMPTY = re.compile(r'"' + _THINK_KEYS + r'"\s*:\s*"[^"]+"')
+RE_EMPTY = re.compile(r'"' + _THINK_KEYS + r'"\s*:\s*""')
 
 
 def log(msg):
@@ -90,35 +97,38 @@ def picked_payload():
 def sniff(text):
     """根据一次响应碎片判断注入是否生效。
 
-    注意：思考被真正关掉时，很多网关**根本不返回 reasoning_content 字段**
-    （而不是返回空字符串）。所以"没有该字段"也要视为生效，否则永远确认不了。
-    """
-    if RE_NONEMPTY.search(text):
-        # 上游仍在思考 → 当前字段没用
-        _state["ok"] = False
-        _state["fails"] += 1
-        cur = DISABLE_PAYLOADS[min(_state["idx"], len(DISABLE_PAYLOADS) - 1)][0]
-        if _state["idx"] < len(DISABLE_PAYLOADS) - 1:
-            _state["idx"] += 1
-            nxt = DISABLE_PAYLOADS[_state["idx"]][0]
-            log("ALARM 字段 %s 没生效（上游仍在思考），自动切换到 %s" % (cur, nxt))
-        else:
-            now = time.time()
-            if now - _state["last_alarm"] > 600:
-                _state["last_alarm"] = now
-                log(
-                    "ERROR 所有候选字段都关不掉思考（%s）。速度优化已失效——"
-                    "请用 SHIM_DISABLE_FIELD 指定正确字段，或确认该网关支持禁用思考。"
-                    % ", ".join(k for k, _ in DISABLE_PAYLOADS)
-                )
-        return
+    两个已知局限（别把"不会再静默"说满）：
+    1. 只认四个常见键名（reasoning_content / reasoning_text / reasoning / thinking）。
+       网关用别的键名时，这里看不出来——那条路仍是静默的。
+    2. 只嗅响应前 128KB。思考内容若排在很长的工具输出之后，会漏。
 
-    # 没有非空思考内容：空字段，或压根没有这个字段
-    if not _state["ok"]:
-        _state["ok"] = True
-        cur = DISABLE_PAYLOADS[min(_state["idx"], len(DISABLE_PAYLOADS) - 1)][0]
-        kind = "字段为空" if RE_EMPTY.search(text) else "响应里没有该字段"
-        log("OK 字段 %s 已生效（%s）" % (cur, kind))
+    另一件事：思考被真正关掉时，很多网关**根本不返回这些字段**（而不是返回空串），
+    所以"没有该字段"也要视为生效，否则永远确认不了。
+    """
+    msg = None
+    with _state_lock:            # 读-改-写必须原子，服务是多线程的
+        if RE_NONEMPTY.search(text):
+            _state["ok"] = False
+            _state["fails"] += 1
+            if _state["idx"] < len(DISABLE_PAYLOADS) - 1:
+                prev = DISABLE_PAYLOADS[_state["idx"]][0]
+                _state["idx"] += 1
+                msg = "ALARM 字段 %s 没生效（上游仍在思考），自动切换到 %s" % (
+                    prev, DISABLE_PAYLOADS[_state["idx"]][0])
+            else:
+                now = time.time()
+                if now - _state["last_alarm"] > 600:
+                    _state["last_alarm"] = now
+                    msg = ("ERROR 所有候选字段都关不掉思考（%s）。速度优化已失效——"
+                           "请用 SHIM_DISABLE_FIELD 指定正确字段，或确认该网关支持禁用思考。"
+                           % ", ".join(k for k, _ in DISABLE_PAYLOADS))
+        elif not _state["ok"]:
+            _state["ok"] = True
+            cur = DISABLE_PAYLOADS[min(_state["idx"], len(DISABLE_PAYLOADS) - 1)][0]
+            kind = "字段为空" if RE_EMPTY.search(text) else "响应里没有该字段"
+            msg = "OK 字段 %s 已生效（%s）" % (cur, kind)
+    if msg:                      # 日志放锁外，避免 IO 拖住其他请求
+        log(msg)
 
 
 def describe_body(doc):
@@ -216,15 +226,20 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
         total = 0
-        probe = bytearray()   # 只留前 32KB，用来嗅探思考是否真的关掉了
+        probe = bytearray()   # 只留前 128KB 用来嗅探
+        probed = False        # 一旦确认过就不重复判
         try:
             while True:
                 chunk = resp.read(8192)
                 if not chunk:
                     break
                 total += len(chunk)
-                if len(probe) < 32768:
-                    probe.extend(chunk[:32768 - len(probe)])
+                if len(probe) < 131072:
+                    probe.extend(chunk[:131072 - len(probe)])
+                    # 边转发边判：长响应里思考可能在中间，不只末尾
+                    if not probed and len(probe) and RE_NONEMPTY.search(
+                            probe.decode("utf-8", "replace")):
+                        probed = True
                 self.wfile.write(b"%x\r\n" % len(chunk) + chunk + b"\r\n")
                 self.wfile.flush()
             self.wfile.write(b"0\r\n\r\n")
@@ -241,7 +256,7 @@ class Handler(BaseHTTPRequestHandler):
                    time.time() - t0, injected or "-"))
 
         if is_completion and probe:
-            sniff(probe.decode("utf-8", "replace"))
+            sniff(probe.decode("utf-8", "replace"))   # 收尾判一次（含"生效"的确认）
 
     def do_POST(self):
         self._forward("POST")

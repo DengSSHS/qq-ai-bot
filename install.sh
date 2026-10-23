@@ -286,8 +286,14 @@ fi
 sleep 5
 docker ps --format '{{.Names}}' | grep -qx napcat && ok "napcat 容器在跑" || die "napcat 容器没起来"
 # 记录实际用的镜像 digest：上游 latest 变了你能发现
-digest=$(docker inspect napcat --format '{{.Image}}' 2>/dev/null | cut -c1-19)
-[ -n "$digest" ] && ok "NapCat 镜像 digest: ${digest}（要锁定就往 deploy.env 写 NAPCAT_IMAGE=...@sha256:...）"
+# .Image 是本地 image ID，拼不出可拉取的地址；RepoDigests 才是 registry 侧的 digest
+repo_digest=$(docker inspect napcat --format '{{index .RepoDigests 0}}' 2>/dev/null || true)
+if [ -n "$repo_digest" ]; then
+  ok "NapCat 镜像: ${repo_digest}"
+  ok "  想锁定版本：把这一整串写进 deploy.env 的 NAPCAT_IMAGE=，下次就不会随 latest 变"
+else
+  warn "拿不到 RepoDigests（本地 build 的镜像没有），无法给可锁定的 digest"
+fi
 
 # 容器到宿主 docker 网关（NapCat 要连宿主上的 8643）
 GW=$(docker network inspect qqbot_default -f '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null || true)

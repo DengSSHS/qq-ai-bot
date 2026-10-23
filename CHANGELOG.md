@@ -18,6 +18,54 @@
 
 
 
+
+### 第二轮审计（第二次逐行看代码）修掉的东西
+
+这轮 6 条全部成立，而且第 1 条的根因值得记：**我只改了 README，没改 CONTRIBUTING**，
+因为 preflight 从来没有"跨文档数字一致"的检查——它只验证「VERSION 出现在 README、
+section 数 > 5」这类存在性，不比对两个文档说的是不是同一个数。
+
+**1. CONTRIBUTING 与新 README 互相矛盾**
+
+`CONTRIBUTING.md` 还写着「106 项」「它是这套代码的验收标准」，跟 README 的
+「约 100 项、它是配置自检不是行为测试」直接对撞。已改，并**把根因补上**：
+
+`scripts/preflight_checks.py` 新增三项自动检查（改坏能抓住，已实测）：
+- 文档里不许写死 checkall 项数（100~199 项区间，只允许「约 100 项」）
+- 文档说的「N 个必须拦 / N 个必须放行」要和 `tests/` 里 ast 数出来的真实数量一致
+- 文档提到的单元测试总数要和实际 `test_*` 函数数量一致
+
+**2. CHANGELOG 自己写错数字**：说 27 个必须拦，实际 26 个。已改（这正好是上面第 2 条
+检查能抓的类别）。
+
+**3. install.sh 的 digest 提示拿错字段**
+
+`{{.Image}}` 是本地 image ID，用户拿这 19 位字符拼不出可拉取的地址。
+已改成 `{{index .RepoDigests 0}}`，拿不到时明确 warn。
+
+**4. `_state` 并发无锁（改出来的新隐患）**
+
+`ThreadingHTTPServer` 每请求一线程，`_state` 是共享字典，`+=` 是读-改-写三步。
+已加 `threading.Lock`，日志移到锁外避免 IO 拖住其他请求。
+
+**5. sniff 的识别面窄，「不会静默」说满了**
+
+只认 `reasoning_content`；已扩展到 `reasoning_content / reasoning_text / reasoning / thinking`
+四个常见键名，嗅探窗口从 32KB 提到 128KB 并改成边转发边判。
+但**仍然不是全覆盖**：其他键名、思考排在超长工具输出之后，仍会漏。
+这句话已写进 README 和代码 docstring，不再说「彻底解决」。
+
+**6. `tests/` 不在 preflight 的必需文件清单里**
+
+删掉整个目录 preflight 也不报。已加入（4 个测试文件 + `scripts/preflight_checks.py`），
+实测隐藏 `tests/` 会报 4 个 FAIL。
+
+**另外补了一条 README 章节：这些数字哪些能自己验，哪些只能信**
+
+因为「在真实群里跑了几个月」和「群聊行为像不像人」这两件事，机器验不了、
+也没有第三方证据（单作者、0 star）。与其含糊，不如在 README 里标出来：
+前四类数字部署后一分钟就能自验，后两类只能信。
+
 ### 按代码审计修掉的真问题（v0.1.0 之后）
 
 有人逐行看了代码，指出几处硬伤。全部成立，逐条修了：
@@ -33,7 +81,9 @@ key, value = DISABLE_PAYLOADS[0]      # 只用了第一个
 换到不认 `thinking` 的网关时，这个转发层会**静默什么都不做**，日志还显示正常。
 
 已改成真正的自适应：转发响应时嗅探有没有产生 `reasoning_content`，没关掉就自动换下一个
-候选字段；全部失败会打 `ERROR` 日志（限频 10 分钟），不再静默。
+候选字段；全部失败会打 `ERROR` 日志（限频 10 分钟）。
+
+**但这不等于「再也不会静默」**：嗅探只认四个常见键名（`reasoning_content` / `reasoning_text` / `reasoning` / `thinking`），也只嗅响应前 128KB。网关用别的键名、或思考排在超长工具输出之后，仍然漏。这条已知局限写进了代码 docstring。
 支持 `SHIM_DISABLE_FIELD` 强制指定。线上验证日志：`OK 字段 thinking 已生效（响应里没有该字段）`。
 
 **2. `WS_TOKEN` 每次重跑 install 都变（配置漂移）**
@@ -61,7 +111,7 @@ key, value = DISABLE_PAYLOADS[0]      # 只用了第一个
 | 文件 | 覆盖 |
 |---|---|
 | `test_mem_rank.py` | 遗忘曲线的单调性、地板、重要性/复述的影响、值域 |
-| `test_websurf_ipguard.py` | 27 个必须拦的地址（含 `::ffff:127.0.0.1` 这类绕过）、6 个必须放行的 |
+| `test_websurf_ipguard.py` | 26 个必须拦的地址（含 `::ffff:127.0.0.1` 这类绕过）、6 个必须放行的 |
 | `test_seer_paths.py` | 路径白名单：`..` 穿越、符号链接逃逸、敏感文件 |
 | `test_llm_shim.py` | 候选字段切换、不误报、环境变量强制 |
 
