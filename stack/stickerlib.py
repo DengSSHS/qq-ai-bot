@@ -605,7 +605,24 @@ def _triage_one(path):
         return None, "", "判断异常: %s" % e
 
 
+def _file_sha(path):
+    h = hashlib.sha256()
+    try:
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except Exception:
+        return ""
+
+
 def _triage_seen():
+    """返回 {sha256: 判断记录}。
+
+    按**内容哈希**索引而不是文件名：同一张图被不同人反复发，文件名每次都不同
+    （media_<时间戳>_<随机>），按名字索引等于每次都得重新调模型判断一遍。
+    按内容哈希，判过的图再出现直接复用结论。
+    """
     seen = {}
     try:
         with open(TRIAGE, encoding="utf-8") as f:
@@ -617,7 +634,10 @@ def _triage_seen():
                     d = json.loads(line)
                 except Exception:
                     continue
-                seen[d.get("file")] = d
+                key = d.get("sha")
+                if key:
+                    # 后来的记录覆盖前面的（比如 dry-run 后又有 apply 记录）
+                    seen[key] = d
     except FileNotFoundError:
         pass
     return seen
@@ -646,11 +666,12 @@ def media_triage(args=None):
     fixed = 0
     if apply_:
         os.makedirs(PENDING, exist_ok=True)
-        for fn, rec in list(seen.items()):
+        for sha, rec in list(seen.items()):
             if rec.get("applied") or rec.get("verdict") is None:
                 continue
+            fn = rec.get("file") or ""
             src = os.path.join(MEDIA_DIR, fn)
-            if not os.path.isfile(src):
+            if not fn or not os.path.isfile(src):
                 continue                       # 已经被 TTL 清掉了
             try:
                 if rec["verdict"] is True:
@@ -661,7 +682,8 @@ def media_triage(args=None):
                     os.remove(src)
                     act = "deleted"
                 with open(TRIAGE, "a", encoding="utf-8") as f:
-                    f.write(json.dumps({"file": fn, "verdict": rec["verdict"],
+                    f.write(json.dumps({"sha": sha, "file": fn,
+                                        "verdict": rec["verdict"],
                                         "scene": rec.get("scene", ""),
                                         "reason": rec.get("reason", ""),
                                         "ts": int(now), "applied": True,
@@ -672,6 +694,7 @@ def media_triage(args=None):
                 log("triage defer fail %s: %s" % (fn, e))
 
     todo = []
+    reused = 0
     for fn in os.listdir(MEDIA_DIR):
         p = os.path.join(MEDIA_DIR, fn)
         if not os.path.isfile(p):
@@ -680,24 +703,53 @@ def media_triage(args=None):
             continue
         if fn.startswith("gen_"):        # 生成图不参与，那是她自己画的
             continue
-        if fn in seen:                    # 判断过的不重复花钱
-            continue
         age_h = (now - os.path.getmtime(p)) / 3600.0
         if age_h > TRIAGE_MAX_AGE_H:      # 快过期了就别花调用去判
             continue
-        todo.append((p, fn))
+        sha = _file_sha(p)
+        if not sha:
+            continue
+        if sha in seen:
+            # 同内容的图判过 → 复用结论，不重复调模型
+            rec = seen[sha]
+            if apply_ and not rec.get("applied") and rec.get("verdict") is not None:
+                try:
+                    os.makedirs(PENDING, exist_ok=True)
+                    if rec["verdict"] is True:
+                        import shutil
+                        shutil.copy2(p, os.path.join(PENDING, fn))
+                        act = "copied-to-pending"
+                    else:
+                        os.remove(p)
+                        act = "deleted"
+                    with open(TRIAGE, "a", encoding="utf-8") as f:
+                        f.write(json.dumps({"sha": sha, "file": fn,
+                                            "verdict": rec["verdict"],
+                                            "scene": rec.get("scene", ""),
+                                            "reason": rec.get("reason", ""),
+                                            "ts": int(now), "applied": True,
+                                            "action": act, "reused": True},
+                                           ensure_ascii=False) + chr(10))
+                    fixed += 1
+                except Exception as e:
+                    log("triage reuse fail %s: %s" % (fn, e))
+            reused += 1
+            continue
+        todo.append((p, fn, sha))
     todo = todo[:limit]
 
     if not todo:
-        msg = "没有待判断的新图（已判断过的不会重复处理）。"
+        parts = []
+        if reused:
+            parts.append("%d 张复用之前的判断（同内容不再调模型）" % reused)
         if fixed:
-            msg += " 补执行了之前判断过的 %d 张。" % fixed
-        return msg
+            parts.append("补执行 %d 张" % fixed)
+        return "没有待判断的新图。" + (" " + "，".join(parts) + "。" if parts else "")
 
     good, bad, unsure = [], [], []
-    for p, fn in todo:
+    for p, fn, sha in todo:
         worth, scene, reason = _triage_one(p)
-        rec = {"file": fn, "verdict": worth, "scene": scene,
+        rec = {"sha": sha, "file": fn, "verdict": worth, "scene": scene,
                "reason": reason, "ts": int(now), "applied": False}
         if worth is True:
             good.append(rec)
@@ -725,8 +777,10 @@ def media_triage(args=None):
             f.write(json.dumps(rec, ensure_ascii=False) + chr(10))
 
     head = "看了 %d 张（%s）" % (len(todo), "已执行" if apply_ else "仅判断，没动文件")
+    if reused:
+        head += "，另有 %d 张是判过的（直接复用结论）" % reused
     if fixed:
-        head += "，补执行之前判断过的 %d 张" % fixed
+        head += "，补执行 %d 张" % fixed
     out = [head + "："]
     if good:
         out.append("")
@@ -804,6 +858,17 @@ HANDLERS["sticker_triage"] = media_triage
 
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "--settle":
+        # 凌晨结算：判断 + 执行 + 写日报。limit 放大，一次清完当天积压。
+        out = media_triage({"apply": True, "limit": 200})
+        try:
+            with open(os.path.join(BASE, "memory/sticker-daily.log"),
+                      "a", encoding="utf-8") as f:
+                f.write("%s%s%s%s" % (time.strftime("%F %T"), chr(10), out, chr(10) * 2))
+        except Exception as e:
+            log("settle log fail: %s" % e)
+        print(out)
+        sys.exit(0)
     if len(sys.argv) > 1 and sys.argv[1] == "--triage":
         apply_ = "--apply" in sys.argv
         lim = 20

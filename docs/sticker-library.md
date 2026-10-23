@@ -154,6 +154,38 @@ PIL 画的抽象图   → NO  纯色圆圈加微小文字缺乏构图与情绪�
 **一个设计细节**：dry-run 也会写记录（避免重复花钱判断），所以 apply 时
 会先“补执行”之前判断过但没动文件的那批，不重复调模型。
 
+## 五之三、每天凌晨 3 点自动结算
+
+`sticker-settle.timer` 每天 03:00 跑一次 `stickerlib.py --settle`，做三件事：
+
+```
+扫 media/ 下未过期的附件
+   ├─ 算 sha256 → 查 triage.jsonl 缓存
+   │    命中 → 直接复用结论（同一张图被反复发，不重复调模型）
+   │    未命中 → 调模型判断（值得吗 / 场景 / 理由）
+   ├─ 值得 → 复制到 sticker-pack/pending/
+   └─ 不值得 → 删原图，记录理由
+最后写一份日报到 memory/sticker-daily.log
+```
+
+**为什么要把 TTL 从 6 小时改成 30 小时**：这是这套结算的前提。
+
+插件默认给附件 6 小时 TTL，下午两点收到的图晚上八点就没了。
+凌晨 3 点结算时，前一天白天的图早就被清掉——**结算等于对着空气做**。
+所以 `cordis.patch.yml` 里加了 `tempTtlHours: 30`（多留 6 小时余量）。
+
+**为什么按 sha256 缓存而不是文件名**：同一张图被不同人反复发时，文件名每次都是
+新的（`media_<时间戳>_<随机>`）。按文件名索引等于每次都要重新调模型判断一遍；
+按内容哈希，判过就直接复用结论。这是省调用量的关键。
+
+查看结算结果：
+
+```bash
+tail -30 /opt/dsh/memory/sticker-daily.log     # 每天的结算报告
+cat /opt/dsh/sticker-pack/triage.jsonl | tail  # 每张图的判断记录（含理由）
+systemctl list-timers sticker-settle.timer     # 下次什么时候跑
+```
+
 ## 六、踩过的坑（别重犯）
 
 **1. 空场景 = 死库存**

@@ -271,12 +271,27 @@ class Triage(Base):
         self.assertGreater(len(scenes), 3)
 
     def test_seen_parses_jsonl(self):
+        """按内容哈希索引；坏行跳过。"""
         with open(stickerlib.TRIAGE, "w", encoding="utf-8") as f:
-            f.write('{"file":"a.jpg","verdict":true}' + chr(10))
+            f.write('{"sha":"aaa","file":"a.jpg","verdict":true}' + chr(10))
             f.write('坏行' + chr(10))
-            f.write('{"file":"b.jpg","verdict":false}' + chr(10))
+            f.write('{"sha":"bbb","file":"b.jpg","verdict":false}' + chr(10))
         seen = stickerlib._triage_seen()
-        self.assertEqual(set(seen), {"a.jpg", "b.jpg"}, "坏行要能跳过")
+        self.assertEqual(set(seen), {"aaa", "bbb"}, "坏行要能跳过")
+
+    def test_same_content_judged_once(self):
+        """同一张图（内容相同、文件名不同）只判断一次——这是省调用的关键。"""
+        a = self._put("media_111_a.jpg")
+        with open(stickerlib.TRIAGE, "w", encoding="utf-8") as f:
+            f.write(json.dumps({"sha": stickerlib._file_sha(a), "file": "media_111_a.jpg",
+                                "verdict": True, "scene": "卖萌可爱", "applied": False},
+                               ensure_ascii=False) + chr(10))
+        # 同一内容换个文件名再放一次
+        b = os.path.join(self.media, "media_222_b.jpg")
+        with open(a, "rb") as src, open(b, "wb") as dst:
+            dst.write(src.read())
+        out = stickerlib.media_triage({})       # 只判断模式
+        self.assertIn("复用", out, "同内容的图应复用结论，而不是再判一次")
 
     def test_no_media_is_safe(self):
         out = stickerlib.media_triage({})
