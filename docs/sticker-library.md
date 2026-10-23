@@ -319,3 +319,65 @@ PYTHONPATH=/opt/dsh/lib python3 /opt/dsh/stickerlib.py --backfill
 优先看那个 `force=true` 出口，而不是把阈值调宽。
 
 `sticker_stats` 能直接看出这个比例有没有变宽。
+
+---
+
+# 附：跨群长期记忆（memory_distill.py）
+
+跟表情库无关，但同一套思路：**存下来的东西必须有注入通道，否则等于没写。**
+
+## 现状调查（2026-10-24）
+
+```
+notes.md 三个预留区块      全是「（还没记）」
+diary/                    只有装机时那两条
+五个记忆工具真实调用次数    0
+workspace/AGENTS.md       2787 字节，21956 行会话里只出现 8 次
+```
+
+原因是 `agent-instructions` 插件在这个 profile 里 `disabled: true`，
+`AGENTS.md` 从来不会被自动注入，只能靠她主动 `read`。记忆写进去，没人念。
+
+## 现在的结构
+
+```
+memory/knowledge.json    机器维护的结构化知识（带 count/证据/scope）
+memory/knowledge.md      完整版，给人看
+workspace/AGENTS.md      托管区块（auto-memory:begin/end）← 每轮注入这份
+memory_distill.py        蒸馏器，每天 03:10 跑
+```
+
+`notes.md` **不动**——`tool_notes_write` 是整文覆盖，蒸馏写进去会被她一次抹掉。
+
+## 关键设计
+
+**1. 单一知识池，跨群共用。** 用户的要求：学习是总体的，不是切在每个群里。
+但每条带 `scope`（`all` / `g:群号` / `u:QQ`），注入时标来源，并规定
+「标了群的只在该群用」。同一条在两个以上场合出现 → 自动升级为 `all`。
+
+**2. 每条都要证据。** `count` / `first` / `last` / 来源会话。只观察到一次的
+标「（单次）」，提醒别当定论。没有证据的“规律”是最容易污染长期记忆的东西。
+
+**3. 过滤会过期的东西。** 实测第一版抽出了「接口走腾讯 tokenhub」「表情库共
+4194 张」——那是运行状态不是知识，两周后就错。现在按关键词过滤（模型名/接口/
+token/服务器/工作区/数量），并且丢弃“某工具只能/拿不到”这类能力断言——
+实测出现过把 `qq_group_history` 说成“拿不到正文”，而 prompt 里明写着会返回。
+
+12 个群/私聊会话 → 抽 43 条 → 过滤 8 条 → 保留 35 条。
+
+## 注入怎么接上的
+
+`agent-instructions` 插件禁用状态在 patch 层改不动（试过，`--dump-config`
+仍显示 `disabled: true`）。所以改在 `prompt.js`（本来就已是本地 fork）：
+`readAgentsMemory()` 读 `workspace/AGENTS.md`，追加到 `platform` 段。
+persona 就是这么注入的，会话里能验证到（87 次命中）。
+
+实测：注入探针消息后，新的 system 消息里出现
+「## 长期记忆（workspace/AGENTS.md）」及 AGENTS.md 内容 ✅
+
+## 注意
+
+- 改 `prompt.js` 会被插件升级覆盖，升级后要重新打补丁（备份在
+  `prompt.js.bak-memonject`）
+- `AGENTS.md` 每轮进提示，所以托管区块上限 2200 字，别让它无限长
+- 蒸馏每天一次全量重扫，11 个会话 11 次模型调用
