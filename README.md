@@ -153,7 +153,7 @@ persona/
   TEMPLATE.md       人设骨架（{{占位符}}，按描述填）
   example-jingjing.md  示例角色（151 行，可直接用）
 stack/              运行时主体：12 个 Python 服务/工具 + 配置模板 + systemd
-tests/              56 个单元测试（纯函数 + 安全边界）
+tests/              57 个单元测试（纯函数 + 安全边界）
 scripts/            preflight 的 Python 侧检查
 .github/workflows/  CI：语法、密钥扫描、换行、占位符、单元测试
 ```
