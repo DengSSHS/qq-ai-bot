@@ -728,6 +728,25 @@ def _file_sha(path):
         return ""
 
 
+def _sticker_shas():
+    """库内已有的 {sha256: id}。
+
+    结算时先用它挡一道：一张已经入库的图又躺在 media/ 里（比如重跑测试
+    留下的副本），不挡的话会：调一次模型判“值得收” → 复制进 pending →
+    注入一轮让她收 → 她调 ingest 回“库里已经有了”。三份成本买一句空话。
+
+    注意字段名是 `hash`（插件的写法），不是 `sha256`。
+    """
+    out = {}
+    try:
+        for s in load_json(STICKERS, []):
+            if isinstance(s, dict) and s.get("hash"):
+                out[s["hash"]] = s.get("id")
+    except Exception:
+        pass
+    return out
+
+
 def _triage_seen():
     """返回 {sha256: 判断记录}。
 
@@ -772,6 +791,8 @@ def media_triage(args=None):
     if not os.path.isdir(MEDIA_DIR):
         return "找不到 %s。" % MEDIA_DIR
     seen = _triage_seen()
+    lib_shas = _sticker_shas()
+    dup = 0
     now = time.time()
 
     # 先补做「dry-run 时判断过、但没执行动作」的那批（不重复调模型）
@@ -821,6 +842,11 @@ def media_triage(args=None):
         sha = _file_sha(p)
         if not sha:
             continue
+        if sha in lib_shas:
+            # 已经在表情库里了：不用判、不用入库。拦在这里能省一次模型调用
+            # 和一个注入回合（否则她会白调一次 ingest 然后回“已经有了”）。
+            dup += 1
+            continue
         if sha in seen:
             # 同内容的图判过 → 复用结论，不重复调模型
             rec = seen[sha]
@@ -854,6 +880,8 @@ def media_triage(args=None):
         parts = []
         if reused:
             parts.append("%d 张复用之前的判断（同内容不再调模型）" % reused)
+        if dup:
+            parts.append("%d 张库里已经有了，跳过" % dup)
         if fixed:
             parts.append("补执行 %d 张" % fixed)
         return "没有待判断的新图。" + (" " + "，".join(parts) + "。" if parts else "")
@@ -891,6 +919,8 @@ def media_triage(args=None):
     head = "看了 %d 张（%s）" % (len(todo), "已执行" if apply_ else "仅判断，没动文件")
     if reused:
         head += "，另有 %d 张是判过的（直接复用结论）" % reused
+    if dup:
+        head += "，%d 张库里已有（跳过）" % dup
     if fixed:
         head += "，补执行 %d 张" % fixed
     out = [head + "："]

@@ -405,3 +405,57 @@ class TriageReplyParsing(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SettleSkipsExisting(unittest.TestCase):
+    """结算前先查库：已经在库里的图不该再花一次模型调用。
+
+    事故背景：media/ 里留着一张已入库图的副本（重跑测试留下的），
+    结算时它会走完 判值得 -> 进 pending -> 注入让她收 -> 她说"已经有了"
+    的全流程。三份成本买一句空话。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self._saved = (stickerlib.MEDIA_DIR, stickerlib.STICKERS,
+                       stickerlib.TRIAGE, stickerlib.PENDING)
+        stickerlib.MEDIA_DIR = self.tmp
+        stickerlib.STICKERS = os.path.join(self.tmp, "stickers.json")
+        stickerlib.TRIAGE = os.path.join(self.tmp, "triage.jsonl")
+        stickerlib.PENDING = os.path.join(self.tmp, "pending")
+
+    def tearDown(self):
+        (stickerlib.MEDIA_DIR, stickerlib.STICKERS,
+         stickerlib.TRIAGE, stickerlib.PENDING) = self._saved
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_sticker_shas_reads_hash_field(self):
+        """字段名是 hash（插件的写法），不是 sha256。读错就永远挡不住。"""
+        with open(stickerlib.STICKERS, "w", encoding="utf-8") as f:
+            json.dump([{"id": "abc", "hash": "deadbeef"},
+                       {"id": "xyz", "sha256": "cafe"}], f)
+        m = stickerlib._sticker_shas()
+        self.assertEqual(m.get("deadbeef"), "abc")
+        self.assertNotIn("cafe", m, "不该把 sha256 字段当成 hash")
+
+    def test_existing_image_is_skipped(self):
+        """已在库里的图不调模型、不进 pending。"""
+        img = os.path.join(self.tmp, "media_dup.jpg")
+        data = b"\xff\xd8\xff\xe0 fake-jpeg-body"
+        with open(img, "wb") as f:
+            f.write(data)
+        digest = hashlib.sha256(data).hexdigest()
+        with open(stickerlib.STICKERS, "w", encoding="utf-8") as f:
+            json.dump([{"id": "dup", "hash": digest}], f)
+        called = []
+        saved = stickerlib._triage_one
+        stickerlib._triage_one = lambda p: called.append(p) or (True, "卖萌可爱", "x")
+        try:
+            out = stickerlib.media_triage({"apply": True})
+        finally:
+            stickerlib._triage_one = saved
+        self.assertEqual(called, [], "已入库的图不该再调模型")
+        self.assertIn("库", out)
+        self.assertFalse(os.path.isdir(stickerlib.PENDING)
+                         and os.listdir(stickerlib.PENDING), "不该进 pending")
