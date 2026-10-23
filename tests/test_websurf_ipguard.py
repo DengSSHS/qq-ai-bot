@@ -62,6 +62,29 @@ class IpGuard(unittest.TestCase):
                 self.assertIsNotNone(websurf._ip_blocked_reason(bad),
                                      "无法解析的 %r 应该被拦" % bad)
 
+    def test_allow_private_only_when_asked(self):
+        """allow_private=True 是给"用户自己配的固定地址"（自建 SearXNG）用的，
+        默认必须仍然拒绝内网——这是信任边界，不能顺手放开。"""
+        # 默认：拒
+        with self.assertRaises(ValueError):
+            websurf._resolve_safe("127.0.0.1", 8080)
+        # 显式要求：放行
+        try:
+            addrs = websurf._resolve_safe("127.0.0.1", 8080, allow_private=True)
+            self.assertIn("127.0.0.1", addrs)
+        except ValueError as e:
+            self.fail("allow_private=True 时不该拒绝本机地址：%s" % e)
+
+    def test_searxng_requires_url(self):
+        """没配 SEARXNG_URL 时明确报错，不要静默返回空结果。"""
+        saved = websurf.SEARXNG_URL
+        websurf.SEARXNG_URL = ""
+        try:
+            with self.assertRaises(RuntimeError):
+                websurf._search_searxng("test", 3)
+        finally:
+            websurf.SEARXNG_URL = saved
+
     def test_localhost_name_rejected(self):
         """主机名的黑名单（不查 DNS，纯字符串判断）。"""
         for host in ("localhost", "x.localhost", "a.local", "b.internal"):

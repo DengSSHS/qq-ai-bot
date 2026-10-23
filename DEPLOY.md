@@ -243,6 +243,30 @@ ss -lntp | grep 8643                # 期望有监听
 
 ---
 
+## 四之二、搜索后端（可选）
+
+`websurf.py` 默认用 360（中文）/ Bing（英文）的 HTML 页面，靠正则解析——
+**上游一改版就会碎**。想稳一点就自建一个 SearXNG：
+
+```bash
+# 1. 任意方式起一个 SearXNG（docker 一条命令即可），确认能访问
+curl -s 'http://127.0.0.1:8080/search?q=test&format=json' | head -c 100
+
+# 2. 写进环境（websurf 是 MCP 子进程，从 systemd 的 EnvironmentFile 继承）
+echo 'SEARXNG_URL=http://127.0.0.1:8080' >> /opt/dsh/qwen.env
+chmod 600 /opt/dsh/qwen.env
+
+# 3. 重启让它生效
+systemctl restart dsh-onebot
+```
+
+配置后 `auto` 模式会**优先走 SearXNG**，失败再退回 360/Bing。
+想强制只用一个后端：`SEARCH_BACKEND=searxng|bing|so`。
+
+**安全说明**：SearXNG 通常监听本机/内网，而 `websurf` 的 SSRF 防护默认只放行公网。
+所以这里专门开了 `allow_private=True`——判定依据是**地址由谁提供**：
+你写在环境变量里的固定地址可以访问内网，模型或群友给的 URL 永远只允许公网。
+
 ## 五、故障速查（按症状找）
 
 | 症状 | 原因 | 处理 |

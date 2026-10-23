@@ -42,6 +42,30 @@
 以后改 install.sh 这类脚本，改完先跑一次模拟渲染（preflight 里已有这项）。
 
 
+
+### 第 13 条：搜索后端可插拔（加 SearXNG）
+
+`websurf.py` 原来只有 360（中文）/ Bing（英文）两个后端，都靠正则解析 HTML——
+**上游一改版就碎**，这不是会不会的问题。
+
+新增 `_search_searxng()`：走 SearXNG 的 JSON API，结构稳定、可自建。配置：
+
+```bash
+echo 'SEARXNG_URL=http://127.0.0.1:8080' >> /opt/dsh/qwen.env
+systemctl restart dsh-onebot
+```
+
+`auto` 模式下配了它就用它打头，失败退回 360/Bing；`SEARCH_BACKEND=searxng|bing|so` 可强制。
+
+**顺带解决了一个安全设计上的张力**：SearXNG 监听内网，而 SSRF 防护默认只放行公网。
+给 `fetch()` 加了 `allow_private` 参数，但**判定依据是「地址由谁提供」**——
+用户写在环境变量里的固定地址可以访问内网；模型或群友给的 URL 永远走
+`allow_private=False`，仍然只允许公网。这条有单测守着（`test_allow_private_only_when_asked`）。
+
+**第 6 条（增量索引）决定不做**，理由是实测：`search_index.rebuild()` 单次 0.010 秒，
+一年后估算 0.12 秒，而日记写入一天最多 4 次。收益（0.1 秒）远小于增量索引引入的
+「索引与源不一致」排查成本。README 里没写这一条，记在这里备查。
+
 ### 第 9 条：把「省 token」变成可测数字
 
 `llm_shim` 新增 `USAGE` 日志行：记录每轮的 `prompt` / `completion` / `cached` 和命中率

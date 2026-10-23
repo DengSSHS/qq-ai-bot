@@ -13,6 +13,7 @@
 """
 import ipaddress
 import json
+import os
 import re
 import socket
 import sys
@@ -77,12 +78,18 @@ def _ip_blocked_reason(ip_text):
     return str(ip)
 
 
-def _resolve_safe(host, port):
-    """解析域名，任何一个解析结果落在非公网就整条拒绝（防 DNS 混答）。"""
+def _resolve_safe(host, port, allow_private=False):
+    """解析域名，任何一个解析结果落在非公网就整条拒绝（防 DNS 混答）。
+
+    allow_private=True 只用于**用户自己在配置里写死的固定地址**（例如自建 SearXNG
+    监听 127.0.0.1）。信任边界来自"谁提供这个地址"，不是地址本身：
+    模型/群友给的 URL 永远走 allow_private=False。
+    """
     h = str(host or "").strip().lower().strip("[]")
     if not h:
         raise ValueError("网址里没有主机名")
-    if h == "localhost" or h.endswith(".localhost") or h.endswith(".local") or h.endswith(".internal"):
+    if not allow_private and (h == "localhost" or h.endswith(".localhost")
+                              or h.endswith(".local") or h.endswith(".internal")):
         raise ValueError("禁止访问本机/内网地址")
     try:
         infos = socket.getaddrinfo(h, port, proto=socket.IPPROTO_TCP)
@@ -91,9 +98,10 @@ def _resolve_safe(host, port):
     addrs = []
     for info in infos:
         ip = info[4][0]
-        bad = _ip_blocked_reason(ip)
-        if bad:
-            raise ValueError("这个网址指向内网/本机地址（%s），已阻止" % bad)
+        if not allow_private:
+            bad = _ip_blocked_reason(ip)
+            if bad:
+                raise ValueError("这个网址指向内网/本机地址（%s），已阻止" % bad)
         if ip not in addrs:
             addrs.append(ip)
     if not addrs:
@@ -203,6 +211,38 @@ def _strip(s):
     return re.sub(r"(?s)<[^>]+>", "", s or "").replace("&nbsp;", " ").replace("&amp;", "&").strip()
 
 
+SEARXNG_URL = (os.environ.get("SEARXNG_URL") or "").rstrip("/")
+SEARCH_BACKEND = (os.environ.get("SEARCH_BACKEND") or "auto").strip().lower()
+
+
+def _search_searxng(q, n):
+    """自建 SearXNG 的 JSON API。
+
+    为什么加这个：另外两个后端靠正则解析搜索引擎的 HTML，上游一改版就碎。
+    SearXNG 返回 JSON，结构稳定；而且可以自建，不受出口限制影响。
+
+    地址来自用户的环境变量（不是模型给的），所以允许内网——这正是
+    fetch(allow_private=True) 的用途。模型/群友给的 URL 仍然只允许公网。
+    """
+    if not SEARXNG_URL:
+        raise RuntimeError("没有配置 SEARXNG_URL")
+    url = "%s/search?q=%s&format=json" % (SEARXNG_URL, urllib.parse.quote(q))
+    raw = fetch(url, allow_private=True)
+    doc = json.loads(raw)
+    items = []
+    for r in (doc.get("results") or []):
+        if not isinstance(r, dict):
+            continue
+        title = str(r.get("title") or "").strip()
+        link = str(r.get("url") or "").strip()
+        snippet = str(r.get("content") or "").strip()
+        if title and link:
+            items.append((title, link, snippet))
+        if len(items) >= n:
+            break
+    return items
+
+
 def _search_so(q, n):
     """360 搜索：中文效果最好，结果块 class=res-list"""
     url = "https://www.so.com/s?q=" + urllib.parse.quote(q)
@@ -262,7 +302,20 @@ def tool_web_search(args):
     n = max(1, min(n, 10))
     items, src = [], ""
     has_cjk = bool(re.search(r"[\u4e00-\u9fff]", q))
-    order = (("360", _search_so), ("Bing", _search_bing)) if has_cjk else (("Bing", _search_bing), ("360", _search_so))
+    # 后端顺序：SEARCH_BACKEND 显式指定优先；auto 时配了 SearXNG 就用它打头
+    if has_cjk:
+        html_order = (("360", _search_so), ("Bing", _search_bing))
+    else:
+        html_order = (("Bing", _search_bing), ("360", _search_so))
+    if SEARCH_BACKEND == "searxng":
+        order = (("SearXNG", _search_searxng),) + html_order
+    elif SEARCH_BACKEND in ("bing", "so", "360"):
+        want = "Bing" if SEARCH_BACKEND == "bing" else "360"
+        order = tuple(x for x in html_order if x[0] == want) or html_order
+    elif SEARXNG_URL:
+        order = (("SearXNG", _search_searxng),) + html_order    # auto + 有配置就优先
+    else:
+        order = html_order
     for name, fn in order:
         try:
             items = fn(q, n)
@@ -274,7 +327,7 @@ def tool_web_search(args):
             src = name
             break
     if not items:
-        return "没搜到结果（两个搜索源都没给出内容），换个说法再试。"
+        return "没搜到结果（所有搜索源都没给出内容），换个说法再试。"
     out = ["（来源：%s）" % src]
     for i, (t, u, s) in enumerate(items, 1):
         out.append("%d. %s" % (i, t))
