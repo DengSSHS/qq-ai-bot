@@ -50,6 +50,17 @@ def log(msg):
 
 
 def api_key():
+    # 看图可能走独立的 key。注意：dsh 启动 MCP 子进程时**不继承父环境**，
+    # 所以不能只信 os.environ——要从 qwen.env 里读。
+    _v = os.environ.get("VISION_API_KEY")
+    if _v:
+        return _v.strip()
+    try:
+        for line in open(ENVF, encoding="utf-8"):
+            if line.startswith("VISION_API_KEY="):
+                return line.split("=", 1)[1].strip()
+    except Exception:
+        pass
     try:
         for line in open(ENVF, encoding="utf-8"):
             if line.startswith("QWEN_API_KEY="):

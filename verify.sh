@@ -70,6 +70,35 @@ else
   fail "persona.md missing"
 fi
 
+echo "== 6.6 vision =="
+VEOF="$DSH_HOME/qwen.env"
+VB=$(grep -E '^VISION_BASE=' "$VEOF" 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'")
+VM=$(grep -E '^VISION_MODEL=' "$VEOF" 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'")
+VK=$(grep -E '^VISION_API_KEY=' "$VEOF" 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'")
+[ -z "$VK" ] && VK=$(grep -E '^QWEN_API_KEY=' "$VEOF" 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'")
+if [ -z "$VB" ]; then
+  fail "VISION_BASE missing in qwen.env (she will not be able to see images)"
+elif [ -z "$VM" ]; then
+  fail "VISION_MODEL missing in qwen.env"
+else
+  case "$VB" in
+    *api.deepseek.com*)
+      fail "VISION_BASE is a text-only endpoint ($VB) - images will fail" ;;
+  esac
+  # real probe: send a 1x1 png and see if the endpoint accepts an image part
+  PNG='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
+  printf '{"model":"%s","max_tokens":16,"stream":false,"messages":[{"role":"user","content":[{"type":"text","text":"one word please"},{"type":"image_url","image_url":{"url":"data:image/png;base64,%s"}}]}]}' "$VM" "$PNG" > /tmp/_vision_probe.json
+  code=$(curl -s -o /tmp/_vision_resp.json -w '%{http_code}' -X POST "$VB/chat/completions"         -H "Authorization: Bearer $VK" -H 'Content-Type: application/json'         --max-time 45 --data @/tmp/_vision_probe.json 2>/dev/null)
+  code=${code:-000}
+  if [ "$code" = "200" ]; then
+    pass "vision probe 200 (endpoint accepts image input)"
+  else
+    msg=$(head -c 160 /tmp/_vision_resp.json 2>/dev/null | tr -d '
+')
+    fail "vision probe HTTP $code - endpoint likely rejects images. resp: $msg"
+  fi
+fi
+
 echo "== 7. full healthcheck =="
 if [ -f "$DSH_HOME/checkall.py" ]; then
   timeout 120 python3 "$DSH_HOME/checkall.py" > /tmp/_verify_checkall.txt 2>&1

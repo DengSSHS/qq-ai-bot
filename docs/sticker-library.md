@@ -634,3 +634,40 @@ prompt 里把 safe 单独定义（隐私、真人自拍、擦边、政治敏感�
 
 新增 6 个测试钉住：safe=false 解析、缺字段不默认安全、不安全不进 pending、
 安全的照常进 pending。
+
+---
+
+# 附五：看图端点为什么容易配错（v0.3.1 修）
+
+三个坑叠在一起，症状只有一个：**能聊天，但说看不到图片**，而且日志里不报错。
+
+**坑一：`deploy.env.example` 没有 `VISION_BASE` 项**
+`install.sh` 让它回落到 `$LLM_BASE_URL`，而示例里那是 `api.deepseek.com`
+——纯文本接口，不收图片。
+
+**坑二：占位符打在了错的路径上**
+`install.sh` 替换的是 `profiles/web/local-memory/cordis.patch.yml`，
+但 npm 把 `local-memory` 复制进 `node_modules`，**运行时读的是
+`node_modules/local-memory/cordis.patch.yml`**。于是 `__VISION_BASE__`
+原样进了 MCP 配置，请求被发到 `__VISION_BASE__/chat/completions`。
+
+**坑三：MCP 子进程不继承父环境**
+dsh 用配置里的 `env:` 段决定子进程环境。所以把 `VISION_BASE` 写进
+`qwen.env`（systemd EnvironmentFile）**对 MCP 子进程无效**，必须写进
+MCP 配置的 `env:` 段——这也是 `install.sh` 要 sed 那个文件的原因。
+
+同理，`seer.api_key()` 不能只信 `os.environ`：MCP 子进程里没有
+`VISION_API_KEY`，得回落到读 `qwen.env`。
+
+## 现在有四道检查
+
+```
+install.sh   装之前：指向 api.deepseek.com 就警告"看不见图片"
+install.sh   装之后：node_modules 里还有 __VISION_BASE__ 就 die
+verify.sh    6.6 真发一张 1x1 的图，HTTP 非 200 判 FAIL
+checkall.py  体检（目前不覆盖看图，靠上面三条）
+```
+
+关键的教训：**"配置写了"不等于"配置到了"**。第一版我只加了 `qwen.env` 就以为
+修好了，实际 MCP 子进程根本读不到——这种失败不会报错，只会表现为"她看不见图"，
+和"模型不想看图"几乎无法区分。

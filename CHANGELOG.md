@@ -2,6 +2,54 @@
 
 本项目按「改了什么 + 为什么」记录，不按版本号堆功能。所有日期为实际改动日期。
 
+## v0.3.1 — 2026-10-24 · 修复「看不了图」
+
+**装完能用 QQ 聊天，但看不见任何图片。** 这一版只修这个。
+
+### 症状
+
+一切看起来正常，只是她说"看不到图片"：`read_image`、表情分类、截图隐私判断
+全部失效，而日志里没有明显报错。
+
+### 两个原因叠在一起
+
+**1. 部署包里看图端点没有可填的入口**
+
+`deploy.env.example` 里根本没有 `VISION_BASE`，而 `install.sh` 让它回落到
+`$LLM_BASE_URL`——示例配置里那是 `https://api.deepseek.com`，**纯文本接口，
+不支持图片输入**。
+
+**2. 占位符替换打错了路径**
+
+`install.sh` 只替换了 `profiles/web/local-memory/cordis.patch.yml`，但 npm 会把
+`local-memory` 复制进 `node_modules`，**运行时读的是 `node_modules` 那一份**。
+于是 `VISION_BASE: __VISION_BASE__` 原样进了 MCP 配置，看图请求被发到
+`__VISION_BASE__/chat/completions`。
+
+顺带一个容易踩的点：**dsh 启动 MCP 子进程时不继承父环境**，所以光把
+`VISION_BASE` 写进 `qwen.env` 不够，必须写进 MCP 配置的 `env:` 段。
+
+### 修法
+
+- `deploy.env.example` 增加 `VISION_BASE` / `VISION_MODEL` / `VISION_API_KEY`
+- `install.sh`：装之前先检查——指向 `api.deepseek.com` 就明确警告"她能聊天但看不见图片"
+- `install.sh`：npm 安装后**同时**替换 `node_modules/local-memory` 那份，并留一道守卫：
+  如果占位符还在就 die，而不是装完静默不工作
+- `seer.py`：`api_key()` 在没有环境变量时从 `qwen.env` 读 `VISION_API_KEY`
+  （因为 MCP 子进程拿不到父环境）
+- `verify.sh`：新增 **6.6 看图探测**——真发一张 1×1 的图到端点，HTTP 非 200 就 FAIL
+
+### 验证
+
+容器里跑 `install.sh`（填了 VISION）：
+
+```
+node_modules/local-memory/cordis.patch.yml: VISION_BASE: https://vision.example.com/v1
+占位符残留：0
+```
+
+线上实测：真端点返回 200；模拟 MCP 环境调用 → "一只圆滚滚的蓝色卡通小鲸鱼…"。
+
 ## v0.3.0 — 2026-10-24 · 预算熔断 + 内容风险筛查
 
 一个刹车、一道闸门：前者管钱，后者管"别把别人的隐私转出去"。

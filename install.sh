@@ -48,6 +48,19 @@ LLM_BASE_URL="${LLM_BASE_URL:-}"; LLM_MODEL="${LLM_MODEL:-}"; LLM_API_KEY="${LLM
 [ -n "$LLM_BASE_URL" ]|| die "deploy.env 里 LLM_BASE_URL 没填"
 [ -n "$LLM_MODEL" ]   || die "deploy.env 里 LLM_MODEL 没填"
 [ -n "$LLM_API_KEY" ] || die "deploy.env 里 LLM_API_KEY 没填"
+
+# 看图端点：没单独填就回落到模型线路
+VISION_BASE="${VISION_BASE:-$LLM_BASE_URL}"
+VISION_MODEL="${VISION_MODEL:-$LLM_MODEL}"
+VISION_API_KEY="${VISION_API_KEY:-$LLM_API_KEY}"
+# 纯文本接口看不了图，而且失败得很安静（她只会说"看不到"）。装之前就讲清楚。
+case "$VISION_BASE" in
+  *api.deepseek.com*)
+    warn "看图端点指向 api.deepseek.com —— 这个接口不支持图片输入"
+    warn "  -> 她能聊天，但看不见任何图片（read_image / 表情分类 / 隐私判断全失效）"
+    warn "  -> 要修：在 deploy.env 里设 VISION_BASE 和 VISION_MODEL 指向多模态端点"
+    ;;
+esac
 [ -d "$STACK" ]       || die "找不到 stack/ 目录，别把脚本单独拿走"
 
 # 人设三个选项（默认第一个）：
@@ -199,6 +212,9 @@ phase "7/9 写配置"
 umask 077
 cat > "$DSH_HOME/qwen.env" <<ENVEOF
 QWEN_API_KEY=${LLM_API_KEY}
+VISION_BASE=${VISION_BASE}
+VISION_MODEL=${VISION_MODEL}
+VISION_API_KEY=${VISION_API_KEY}
 ENVEOF
 umask 022
 ok "qwen.env 写好（600）"
@@ -229,6 +245,19 @@ cd "$DSH_HOME/profiles/web"
 #   所以按线上的实际解析方式装，而不是让 npm 判死刑。
 run "$NODE_DIR/bin/npm" install --legacy-peer-deps --registry="$NPM_REG"     || die "装 profile 依赖失败（网络问题可换 NPM_REG）"
 ok "profile 依赖装好"
+# npm 会把 local-memory 复制进 node_modules，**运行时读的是那一份**。
+# 只改 profiles/web/local-memory 的话，占位符照样进 MCP 配置，
+# 看图请求会发到 "__VISION_BASE__/chat/completions" —— 她从此看不见任何图片。
+LM_CFG="$DSH_HOME/profiles/web/node_modules/local-memory/cordis.patch.yml"
+if [ -f "$LM_CFG" ]; then
+  sed -i "s|__VISION_BASE__|${VISION_BASE}|g" "$LM_CFG"
+  if grep -q "__VISION_BASE__" "$LM_CFG"; then
+    die "看图端点占位符没替换干净（$LM_CFG），她会看不见图片"
+  fi
+  ok "看图端点已写入 MCP 配置：${VISION_BASE}"
+else
+  warn "没找到 $LM_CFG，跳过看图端点检查"
+fi
 ls node_modules/dsh-onebot-qq >/dev/null 2>&1 && ok "onebot 插件在位" || die "dsh-onebot-qq 没装上"
 
 # 7.4 LLM 转发层（强制关思考，可快 4~5 倍）
