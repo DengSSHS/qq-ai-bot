@@ -475,6 +475,21 @@ TOOLS = [
     },
 ]
 
+TOOLS.append({
+    "name": "sticker_triage",
+    "description": ("筛群友发来的图：判断每张值不值得收进表情库。"
+                    "值得的复制到 pending/ 并给出场景，不值得的记理由后删掉。"
+                    "默认只看不删（dry-run）；确定要执行就传 apply=true。"
+                    "插件给附件 6 小时 TTL，所以过期的图不用管。"),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "apply": {"type": "boolean", "description": "true = 真的复制/删除；省略则只判断"},
+            "limit": {"type": "integer", "description": "一次最多看几张，默认 20"},
+        },
+    },
+})
+
 HANDLERS = {
     "sticker_pick": pick,
     "sticker_ingest": ingest,
@@ -522,6 +537,218 @@ def handle(req):
         return
     if mid is not None:
         reply(mid, error={"code": -32601, "message": "method not found"})
+
+
+# ── 收图筛选：判断群友发的图值不值得收 ────────────────────────────────
+MEDIA_DIR = os.path.join(BASE, "media/onebot")
+TRIAGE = os.path.join(BASE, "sticker-pack/triage.jsonl")
+PENDING = os.path.join(BASE, "sticker-pack/pending")
+TRIAGE_MAX_AGE_H = 5.5          # 插件 TTL 是 6 小时，留半小时余量
+
+TRIAGE_QUESTION = """这张图适合当作 QQ 群聊里的表情包素材收录吗？请严格判断，宁缺毋滥。
+判 YES：表达明确情绪或梗、构图完整、有转发价值（让人想转给别人）、文字清晰可读。
+判 NO：聊天/通知/网页截图、纯文字、模糊或过曝、广告水印、别人的自拍或隐私、
+看不出想表达什么、尺寸怪异的竖长截屏。
+如果判 YES，从这些场景里选一个最贴的：{scenes}
+回答格式（一行，用竖线分隔）：VERDICT|场景|一句话理由"""
+
+
+DEFAULT_SCENES = ["卖萌可爱", "嘲讽怼人", "开心笑", "委屈哭", "无语尴尬",
+                  "生气炸毛", "吃饿", "疑问困惑", "震惊离谱", "赞同OK",
+                  "忙工作", "撒娇求", "告别晚安", "打招呼", "期待等待",
+                  "拒绝不要", "搞颜色或擦边", "杂图"]
+
+
+def _scenes():
+    """从库里统计实际用到的场景，再用默认表补足。
+
+    补足的原因：如果库很小或数据异常（比如标签文件只剩一类），
+    只给模型 1 个场景等于逼它全都归到那一类。prompt 里的候选越全，
+    打标才越有意义。
+    """
+    names = []
+    try:
+        d = load_json(TAGS, {})
+        import collections
+        c = collections.Counter((v.get("scene") or "").strip() for v in d.values())
+        names = [k for k, _ in c.most_common() if k]
+    except Exception:
+        pass
+    for s in DEFAULT_SCENES:
+        if s not in names:
+            names.append(s)
+    return names
+
+
+def _triage_one(path):
+    """一次模型调用，返回 (值得收?, 场景, 理由)。"""
+    try:
+        import seer
+        q = TRIAGE_QUESTION.replace("{scenes}", " / ".join(_scenes()))
+        ans, err = seer._ask_model(path, q)
+        if err or not ans:
+            return None, "", err or "模型没返回"
+        parts = [x.strip() for x in ans.strip().split("|")]
+        verdict = parts[0].upper() if parts else ""
+        scene = parts[1] if len(parts) > 1 else ""
+        reason = parts[2] if len(parts) > 2 else ans[:60]
+        if verdict.startswith("YES") or verdict.startswith("是"):
+            return True, scene, reason
+        if verdict.startswith("NO") or verdict.startswith("不"):
+            return False, scene, reason
+        # 没按格式答：从严，当 NO 但记下原文
+        low = ans.lower()
+        if "yes" in low[:20]:
+            return True, scene, reason
+        return False, scene, ans[:60]
+    except Exception as e:
+        return None, "", "判断异常: %s" % e
+
+
+def _triage_seen():
+    seen = {}
+    try:
+        with open(TRIAGE, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except Exception:
+                    continue
+                seen[d.get("file")] = d
+    except FileNotFoundError:
+        pass
+    return seen
+
+
+def media_triage(args=None):
+    """扫群友发来的图，判断值不值得收。
+
+    背景：插件默认给消息附件 6 小时 TTL，过期自动删。所以判断必须在这窗口内做，
+    否则图就没了。本工具做三件事：
+      1. 判断（一次模型调用拿到 值得?/场景/理由）
+      2. 值得的 → 复制到 sticker-pack/pending/，并告诉调用方去调 qq_save_sticker
+      3. 不值得的 → 记一笔（triage.jsonl）然后删掉，不等 TTL
+    apply=False 时只判断不动文件（默认）。
+    """
+    args = args or {}
+    apply_ = bool(args.get("apply"))
+    limit = int(args.get("limit") or 20)
+
+    if not os.path.isdir(MEDIA_DIR):
+        return "找不到 %s。" % MEDIA_DIR
+    seen = _triage_seen()
+    now = time.time()
+
+    # 先补做「dry-run 时判断过、但没执行动作」的那批（不重复调模型）
+    fixed = 0
+    if apply_:
+        os.makedirs(PENDING, exist_ok=True)
+        for fn, rec in list(seen.items()):
+            if rec.get("applied") or rec.get("verdict") is None:
+                continue
+            src = os.path.join(MEDIA_DIR, fn)
+            if not os.path.isfile(src):
+                continue                       # 已经被 TTL 清掉了
+            try:
+                if rec["verdict"] is True:
+                    import shutil
+                    shutil.copy2(src, os.path.join(PENDING, fn))
+                    act = "copied-to-pending"
+                else:
+                    os.remove(src)
+                    act = "deleted"
+                with open(TRIAGE, "a", encoding="utf-8") as f:
+                    f.write(json.dumps({"file": fn, "verdict": rec["verdict"],
+                                        "scene": rec.get("scene", ""),
+                                        "reason": rec.get("reason", ""),
+                                        "ts": int(now), "applied": True,
+                                        "action": act, "deferred_from": rec.get("ts")},
+                                       ensure_ascii=False) + chr(10))
+                fixed += 1
+            except Exception as e:
+                log("triage defer fail %s: %s" % (fn, e))
+
+    todo = []
+    for fn in os.listdir(MEDIA_DIR):
+        p = os.path.join(MEDIA_DIR, fn)
+        if not os.path.isfile(p):
+            continue
+        if not fn.lower().endswith((".jpg", ".jpeg", ".png", ".gif", ".webp")):
+            continue
+        if fn.startswith("gen_"):        # 生成图不参与，那是她自己画的
+            continue
+        if fn in seen:                    # 判断过的不重复花钱
+            continue
+        age_h = (now - os.path.getmtime(p)) / 3600.0
+        if age_h > TRIAGE_MAX_AGE_H:      # 快过期了就别花调用去判
+            continue
+        todo.append((p, fn))
+    todo = todo[:limit]
+
+    if not todo:
+        msg = "没有待判断的新图（已判断过的不会重复处理）。"
+        if fixed:
+            msg += " 补执行了之前判断过的 %d 张。" % fixed
+        return msg
+
+    good, bad, unsure = [], [], []
+    for p, fn in todo:
+        worth, scene, reason = _triage_one(p)
+        rec = {"file": fn, "verdict": worth, "scene": scene,
+               "reason": reason, "ts": int(now), "applied": False}
+        if worth is True:
+            good.append(rec)
+        elif worth is False:
+            bad.append(rec)
+        else:
+            unsure.append(rec)
+
+        # 落盘：值得的进 pending，不值得的删（apply 时）
+        if apply_:
+            try:
+                os.makedirs(PENDING, exist_ok=True)
+                if worth is True:
+                    import shutil
+                    shutil.copy2(p, os.path.join(PENDING, fn))
+                    rec["applied"] = True
+                    rec["action"] = "copied-to-pending"
+                elif worth is False:
+                    os.remove(p)
+                    rec["applied"] = True
+                    rec["action"] = "deleted"
+            except Exception as e:
+                rec["action"] = "error: %s" % e
+        with open(TRIAGE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + chr(10))
+
+    head = "看了 %d 张（%s）" % (len(todo), "已执行" if apply_ else "仅判断，没动文件")
+    if fixed:
+        head += "，补执行之前判断过的 %d 张" % fixed
+    out = [head + "："]
+    if good:
+        out.append("")
+        out.append("值得收 %d 张：" % len(good))
+        for r in good:
+            out.append("  %s  [%s] %s" % (r["file"], r["scene"] or "未分类", r["reason"][:50]))
+        out.append("  收的话调 qq_save_sticker(path=%s%s)" %
+                   (PENDING, "/<文件名>"))
+    if bad:
+        out.append("")
+        out.append("不值得收 %d 张%s：" % (len(bad), "（已删）" if apply_ else "（未删，看下面理由）"))
+        for r in bad:
+            out.append("  %s  %s" % (r["file"], r["reason"][:50]))
+    if unsure:
+        out.append("")
+        out.append("拿不准 %d 张（模型没给准话，保留不动）：" % len(unsure))
+        for r in unsure:
+            out.append("  %s  %s" % (r["file"], r["reason"][:50]))
+    if not apply_:
+        out.append("")
+        out.append("想真的执行（复制好的 / 删差的）就加 apply=true。")
+    return chr(10).join(out)
 
 
 def backfill(limit=0):
@@ -572,7 +799,19 @@ def backfill(limit=0):
     return 0
 
 
+# media_triage 定义在文件后半部分，这里补注册（避免前向引用）
+HANDLERS["sticker_triage"] = media_triage
+
+
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "--triage":
+        apply_ = "--apply" in sys.argv
+        lim = 20
+        for a in sys.argv[2:]:
+            if a.isdigit():
+                lim = int(a)
+        print(media_triage({"apply": apply_, "limit": lim}))
+        sys.exit(0)
     if len(sys.argv) > 1 and sys.argv[1] == "--backfill":
         limit = int(sys.argv[2]) if len(sys.argv) > 2 else 0
         sys.exit(backfill(limit))

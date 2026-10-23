@@ -241,6 +241,62 @@ class Ingest(Base):
         self.assertIsNone(stickerlib.phash(p))
 
 
+class Triage(Base):
+    def setUp(self):
+        super().setUp()
+        self._saved_paths = (stickerlib.MEDIA_DIR, stickerlib.TRIAGE, stickerlib.PENDING)
+        self.media = os.path.join(self.tmp, "media")
+        os.makedirs(self.media, exist_ok=True)
+        stickerlib.MEDIA_DIR = self.media
+        stickerlib.TRIAGE = os.path.join(self.tmp, "triage.jsonl")
+        stickerlib.PENDING = os.path.join(self.tmp, "pending")
+
+    def tearDown(self):
+        stickerlib.MEDIA_DIR, stickerlib.TRIAGE, stickerlib.PENDING = self._saved_paths
+        super().tearDown()
+
+    def _put(self, name, age_h=0.0):
+        p = os.path.join(self.media, name)
+        with open(p, "wb") as f:
+            f.write(b"img-" + name.encode())
+        if age_h:
+            old = stickerlib.time.time() - age_h * 3600
+            os.utime(p, (old, old))
+        return p
+
+    def test_scenes_readable(self):
+        """场景列表必须能读到（判 YES 时要让模型从这里选）。"""
+        scenes = stickerlib._scenes()
+        self.assertIsInstance(scenes, list)
+        self.assertGreater(len(scenes), 3)
+
+    def test_seen_parses_jsonl(self):
+        with open(stickerlib.TRIAGE, "w", encoding="utf-8") as f:
+            f.write('{"file":"a.jpg","verdict":true}' + chr(10))
+            f.write('坏行' + chr(10))
+            f.write('{"file":"b.jpg","verdict":false}' + chr(10))
+        seen = stickerlib._triage_seen()
+        self.assertEqual(set(seen), {"a.jpg", "b.jpg"}, "坏行要能跳过")
+
+    def test_no_media_is_safe(self):
+        out = stickerlib.media_triage({})
+        self.assertIn("没有待判断", out)
+
+    def test_skips_generated_and_old(self):
+        """gen_*（她自己画的）不参与；快过期的也不判（省调用）。"""
+        self._put("gen_123.png")               # 生成图
+        self._put("media_old.jpg", age_h=6)     # 超过 TTL 窗口
+        out = stickerlib.media_triage({})
+        self.assertIn("没有待判断", out)
+
+    def test_dry_run_writes_no_action(self):
+        """dry-run 不该删任何文件。"""
+        p = self._put("media_x.jpg")
+        # 无模型可用时 _triage_one 返回 None（拿不准），不会删
+        stickerlib.media_triage({})
+        self.assertTrue(os.path.exists(p), "dry-run 居然删了文件")
+
+
 class Hamming(unittest.TestCase):
     def test_identical(self):
         self.assertEqual(stickerlib.hamming("ffff0000ffff0000", "ffff0000ffff0000"), 0)
