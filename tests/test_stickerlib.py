@@ -324,5 +324,84 @@ class Hamming(unittest.TestCase):
         self.assertEqual(stickerlib.hamming("zz", "yy"), 64)
 
 
+class TriageReplyParsing(unittest.TestCase):
+    """判断结果的解析：模型输出会崩，三层兜底得拦住。
+
+    这些用例全部来自真实事故（2026-10-24 重分类 754 张杂图）：
+    小样本串行跑格式完美，并发跑几百张后模型开始抄 prompt 模板、
+    加 markdown、加前缀、甚至直接拒绝。当时解析一崩就默认为噪声，
+    267 条结果只剩 1 条能用。
+    """
+
+    def parse(self, s):
+        return stickerlib._parse_triage_reply(s)
+
+    def test_plain_json(self):
+        v, scene, reason = self.parse(
+            '{"verdict":"YES","scene":"卖萌可爱","reason":"比心存存"}')
+        self.assertTrue(v)
+        self.assertEqual(scene, "卖萌可爱")
+        self.assertEqual(reason, "比心存存")
+
+    def test_json_in_code_fence(self):
+        v, scene, _ = self.parse(
+            '```json\n{"verdict":"NO","scene":"","reason":"聊天截图"}\n```')
+        self.assertFalse(v)
+        self.assertEqual(scene, "")
+
+    def test_markdown_wrapped_scene(self):
+        """模型给标签加了 ** 加粗。"""
+        v, scene, _ = self.parse('{"verdict":"YES","scene":"**无语尴尬**","reason":"翻白眼"}')
+        self.assertTrue(v)
+        self.assertEqual(scene, "无语尴尬")
+
+    def test_scene_with_parenthesis(self):
+        v, scene, _ = self.parse('{"verdict":"YES","scene":"撒娇求(要东西)","reason":"求"}')
+        self.assertEqual(scene, "撒娇求")
+
+    def test_copied_format_template(self):
+        """模型把 prompt 里的格式说明当内容输出了（旧竖线格式那版）。"""
+        v, scene, _ = self.parse("标签|一句话理由 YES|忙工作|加载中")
+        self.assertTrue(v)
+        self.assertEqual(scene, "忙工作")
+
+    def test_legacy_pipe_format(self):
+        v, scene, reason = self.parse("YES|嘲讽怼人|斜眼看人配6字")
+        self.assertTrue(v)
+        self.assertEqual(scene, "嘲讽怼人")
+        self.assertEqual(reason, "斜眼看人配6字")
+
+    def test_prefix_noise(self):
+        """模型自说自话加了一堆前缀。"""
+        v, scene, _ = self.parse("结合这九宫格的整体氛围，最贴的标签是：期待等待")
+        self.assertEqual(scene, "期待等待")
+
+    def test_longest_scene_wins(self):
+        """长名优先：否则「杂图」会抢先从任何带这两个字的句子里命中。"""
+        _, scene, _ = self.parse("这不是杂图，应该算期待等待")
+        self.assertEqual(scene, "期待等待")
+
+    def test_refusal_is_no(self):
+        """模型拒绝回答 → 从严当不值得收，不猜。"""
+        v, _, reason = self.parse("我无法对这张图进行分类。")
+        self.assertFalse(v)
+        self.assertIn("无法", reason)
+
+    def test_empty_is_none(self):
+        """空返回 → None（拿不准），调用方不能当成"值得"。"""
+        v, _, _ = self.parse("")
+        self.assertIsNone(v)
+
+    def test_scene_hints_cover_defaults(self):
+        """每个默认场景都有适用条件。缺条件的那个会吸走大部分图。"""
+        missing = [s for s in stickerlib.DEFAULT_SCENES
+                   if s not in stickerlib.SCENE_HINTS]
+        self.assertEqual(missing, [], "这些场景没有适用条件提示：%s" % missing)
+
+    def test_prompt_has_hints_placeholder(self):
+        """prompt 里必须有 {scenes}，否则场景表注不进去。"""
+        self.assertIn("{scenes}", stickerlib.TRIAGE_QUESTION)
+
+
 if __name__ == "__main__":
     unittest.main()

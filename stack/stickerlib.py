@@ -545,12 +545,46 @@ TRIAGE = os.path.join(BASE, "sticker-pack/triage.jsonl")
 PENDING = os.path.join(BASE, "sticker-pack/pending")
 TRIAGE_MAX_AGE_H = 5.5          # 插件 TTL 是 6 小时，留半小时余量
 
-TRIAGE_QUESTION = """这张图适合当作 QQ 群聊里的表情包素材收录吗？请严格判断，宁缺毋滥。
-判 YES：表达明确情绪或梗、构图完整、有转发价值（让人想转给别人）、文字清晰可读。
-判 NO：聊天/通知/网页截图、纯文字、模糊或过曝、广告水印、别人的自拍或隐私、
+TRIAGE_QUESTION = """这张图适合当作 QQ 群聊里的表情包素材收录吗？严格判断，宁缺毋滥。
+
+判"值得收"：表达明确情绪或梗、构图完整、有转发价值（让人想转给别人）、文字清晰可读。
+判"不值得"：聊天/通知/网页截图、纯文字、模糊或过曝、广告水印、别人的自拍或隐私、
 看不出想表达什么、尺寸怪异的竖长截屏。
-如果判 YES，从这些场景里选一个最贴的：{scenes}
-回答格式（一行，用竖线分隔）：VERDICT|场景|一句话理由"""
+
+如果值得收，从下面这组固定标签里挑**一个**最贴的场景：
+{scenes}
+
+硬规则（不遵守会退化成「杂图」或「卖萌可爱」两个垃圾桶）：
+1. 「卖萌可爱」只给**真的在卖萌**的（比心、蹭、眨眼、主动示好）。
+   图里角色长得可爱但表达的是别的情绪，选那个情绪，不要选它。
+2. 有明确情绪就一定选那个情绪标签，不许往「杂图」「卖萌可爱」里塞。
+3. 只有纯风景、纯文字、设定图、logo 这类完全看不出情绪的才填「杂图」。
+
+只输出 JSON：{{"verdict":"YES或NO","scene":"标签","reason":"不超过12字"}}
+不值得收时 scene 填空字符串。不要输出任何其他内容，不要解释规则。"""
+
+
+# 每个标签后面那句「适用条件」不是装饰：去掉它，「卖萌可爱」会吸走 65% 的图。
+SCENE_HINTS = {
+    "卖萌可爱": "撒娇比心蹭蹭，主动示好",
+    "开心笑": "高兴、大笑、庆祝",
+    "嘲讽怼人": "鄙视、阴阳、diss",
+    "委屈哭": "难过、流泪、被欺负",
+    "无语尴尬": "沉默、白眼、无话可说",
+    "生气炸毛": "发火、愤怒、摔",
+    "吃饿": "吃东西、馋、饿",
+    "疑问困惑": "问号、疑惑、不解",
+    "震惊离谱": "吃惊、难以置信",
+    "赞同OK": "点头、同意、收到",
+    "忙工作": "工作、学习、加班",
+    "撒娇求": "求人、拜托、要东西",
+    "告别晚安": "再见、睡觉、下线",
+    "打招呼": "你好、在吗、招呼",
+    "期待等待": "等、盼、蹲",
+    "拒绝不要": "不要、拒绝、摆手",
+    "搞颜色或擦边": "性暗示",
+    "杂图": "以上都不是",
+}
 
 
 DEFAULT_SCENES = ["卖萌可爱", "嘲讽怼人", "开心笑", "委屈哭", "无语尴尬",
@@ -580,27 +614,105 @@ def _scenes():
     return names
 
 
+def _scenes_with_hint():
+    """带适用条件的场景表（给 prompt 用）。库里出现非标准场景名时只输出名字。"""
+    out = []
+    for s in _scenes():
+        h = SCENE_HINTS.get(s)
+        out.append("%s(%s)" % (s, h) if h else s)
+    return out
+
+
+def _clean_scene_name(s):
+    """场景名清洗：容忍 `**卖萌可爱**`、`标签：卖萌可爱`、`卖萌可爱(撒娇)` 这类写法。
+
+    长名优先匹配——否则「杂图」会抢先从任何带这两个字的句子里命中。
+    """
+    s = str(s or "").strip().strip("*`'\" \t\r\n")
+    scenes = _scenes()
+    if s in scenes:
+        return s
+    for cand in sorted(scenes, key=len, reverse=True):
+        if cand in s:
+            return cand
+    return ""
+
+
+def _verdict_of(s):
+    """从一段文字里认判定词 → True / False / None（认不出）。
+
+    只看最后一个词，因为模型可能输出 `一句话理由 YES` 这种把标签接在
+    说明后面的形式。不匹配「不知道」「不错」——它们不是判定词。
+    """
+    t = str(s or "").strip().upper()
+    for sep in (":", "："):
+        t = t.replace(sep, " ")
+    toks = [x for x in t.split() if x]
+    cand = toks[-1] if toks else ""
+    if not cand:
+        return None
+    if cand.startswith("YES") or cand.startswith("是"):
+        return True
+    if cand.startswith("NO") or cand.startswith("否"):
+        return False
+    if cand.startswith("不值得") or cand.startswith("不适合"):
+        return False
+    if cand.startswith("值得") or cand.startswith("适合"):
+        return True
+    return None
+
+
+def _parse_triage_reply(ans):
+    """解析判断结果 → (值得收?, 场景, 理由)。三层兜底，不抛异常。
+
+    为什么要三层（2026-10-24 实测）：小样本串行跑时格式完美，并发跑几百张
+    后模型开始抄 prompt 里的格式模板、加 markdown、加前缀、甚至拒绝回答。
+    """
+    txt = (ans or "").replace("```json", "").replace("```", "").strip()
+    if not txt:
+        return None, "", "模型返回空"
+
+    obj = None
+    i, j = txt.find("{"), txt.rfind("}")
+    if i >= 0 and j > i:
+        try:
+            obj = json.loads(txt[i:j + 1])
+        except Exception:
+            obj = None
+
+    if isinstance(obj, dict):
+        v = _verdict_of(obj.get("verdict"))
+        scene = _clean_scene_name(obj.get("scene"))
+        reason = str(obj.get("reason") or "").strip()[:80] or txt[:60]
+        if v is not None:
+            return v, scene, reason
+        # JSON 里没写清 verdict：往下走纯文本兜底
+
+    # 兼容旧竖线格式 VERDICT|场景|理由。
+    # 注意：模型的判定词不一定在第一段——实测见过
+    # 「标签|一句话理由 YES|忙工作|加载中」这种把 prompt 模板抄在前面的写法。
+    parts = [x.strip() for x in txt.split("|")]
+    for idx, part in enumerate(parts):
+        v = _verdict_of(part)
+        if v is None:
+            continue
+        scene = _clean_scene_name(parts[idx + 1]) if idx + 1 < len(parts) else ""
+        reason = parts[idx + 2] if idx + 2 < len(parts) else txt[:60]
+        return v, scene, reason
+
+    # 全崩了：从严当 NO，但把原文留在理由里方便人工复查
+    return False, _clean_scene_name(txt), txt[:60].replace("\n", " ")
+
+
 def _triage_one(path):
     """一次模型调用，返回 (值得收?, 场景, 理由)。"""
     try:
         import seer
-        q = TRIAGE_QUESTION.replace("{scenes}", " / ".join(_scenes()))
+        q = TRIAGE_QUESTION.replace("{scenes}", " / ".join(_scenes_with_hint()))
         ans, err = seer._ask_model(path, q)
         if err or not ans:
             return None, "", err or "模型没返回"
-        parts = [x.strip() for x in ans.strip().split("|")]
-        verdict = parts[0].upper() if parts else ""
-        scene = parts[1] if len(parts) > 1 else ""
-        reason = parts[2] if len(parts) > 2 else ans[:60]
-        if verdict.startswith("YES") or verdict.startswith("是"):
-            return True, scene, reason
-        if verdict.startswith("NO") or verdict.startswith("不"):
-            return False, scene, reason
-        # 没按格式答：从严，当 NO 但记下原文
-        low = ans.lower()
-        if "yes" in low[:20]:
-            return True, scene, reason
-        return False, scene, ans[:60]
+        return _parse_triage_reply(ans)
     except Exception as e:
         return None, "", "判断异常: %s" % e
 
