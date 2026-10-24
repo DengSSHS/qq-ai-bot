@@ -41,6 +41,12 @@ MAX_ATTEMPTS_H = 3        # 一小时内最多重启几次（防止和风控死�
 MIN_OFFLINE_S = 120       # 断线多久才动手（避免网络抖动误伤）
 RECOVER_NOTICE_AFTER = 300  # 掉线超过 5 分钟才值得告诉她"刚才掉线了"
 
+# 自动重启容器：默认关闭。
+# 2026-10-25 实测：这台机器每次重启都要求重新扫码（整晚 4 次，0 次成功），
+# 重启不但救不回来，还会把人工正在扫的那张二维码刷掉。所以只告警、不动容器。
+# 换到「重启能快速登录」的环境时，设环境变量 QQG_AUTO_RESTART=1 打开。
+AUTO_RESTART = os.environ.get("QQG_AUTO_RESTART", "0").lower() not in ("0", "", "false", "no")
+
 # NapCat 日志里出现这些，说明 QQ 侧已不在登录状态（而 WS 可能仍连着）
 LOGOUT_MARKERS = (
     "登录态已失效",
@@ -367,8 +373,11 @@ def check(apply_=True):
     # ---------- 连着，但 QQ 可能已经退登（假在线）----------
     if conn:
         window = int(st.get("logout_since") or st.get("checkpoint") or 0)
-        mark = logout_since(window)
-        waiting_scan = qr_fresh()
+        # 先直接问 NapCat 在不在线：这是最准的判据。
+        # 二维码文件会残留在盘上，只看它会把"已登录"误判成"等人扫"。
+        live = online_confirmed()
+        mark = logout_since(window) if live is not True else None
+        waiting_scan = qr_fresh() if live is not True else False
         if mark or waiting_scan:
             reason = mark or "二维码已生成，等人扫"
             first = not st.get("logout_since")
@@ -442,6 +451,12 @@ def check(apply_=True):
     if fresh_kick and len(st["attempts"]) < MAX_ATTEMPTS_H:
         if not apply_:
             return "离线，检测到新踢线（dry-run，不重启）"
+        if not AUTO_RESTART:
+            # 重启救不回来，只会把人工正在扫的码刷掉 —— 只记录，不动容器
+            log("检测到 KickedOffLine；AUTO_RESTART=false，不重启容器，只发告警")
+            st["attempts"].append(now)
+            save_state(st)
+            return "离线，已抑制自动重启（等人工扫码）"
         log("检测到新的 KickedOffLine，重启容器尝试快速登录（第 %d 次）"
             % (len(st["attempts"]) + 1))
         rc, _, err = _docker("restart", CONTAINER, timeout=180)
