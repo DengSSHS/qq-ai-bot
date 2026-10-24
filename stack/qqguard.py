@@ -39,6 +39,17 @@ MAX_ATTEMPTS_H = 3        # 一小时内最多重启几次（防止和风控死�
 MIN_OFFLINE_S = 120       # 断线多久才动手（避免网络抖动误伤）
 RECOVER_NOTICE_AFTER = 300  # 掉线超过 5 分钟才值得告诉她"刚才掉线了"
 
+# NapCat 日志里出现这些，说明 QQ 侧已不在登录状态（而 WS 可能仍连着）
+LOGOUT_MARKERS = (
+    "登录态已失效",
+    "用户身份已失效",
+    "请扫描下面的二维码",
+    "需要验证码",
+    "Login Error,ErrType",
+)
+QR_FILE = "/app/napcat/cache/qrcode.png"
+QR_FRESH_S = 600          # 二维码 10 分钟内算"待扫"
+
 
 def log(msg):
     line = "%s %s" % (time.strftime("%F %T"), msg)
@@ -59,7 +70,8 @@ def load_state():
     except Exception:
         pass
     return {"checkpoint": int(time.time()), "attempts": [],
-            "offline_since": 0, "reported_for": 0}
+            "offline_since": 0, "reported_for": 0,
+            "logout_since": 0, "alerted_logout_for": 0}
 
 
 def save_state(st):
@@ -108,6 +120,131 @@ def qr_ready():
     return rc == 0
 
 
+def classify_log(lines):
+    """从日志行里判断 QQ 侧是不是已经没登录了。返回命中的关键字，否则 None。
+
+    抽成纯函数是为了能单测：NapCat 日志格式一变，这里要能第一时间红。
+    """
+    for line in lines:
+        for marker in LOGOUT_MARKERS:
+            if marker in line:
+                return marker
+    return None
+
+
+def logout_since(ts):
+    """ts 之后有没有"登录态失效"类的日志。返回命中的关键字或 None。"""
+    since = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(ts))
+    rc, out, _ = _docker("logs", "--since", since, CONTAINER)
+    if rc != 0:
+        return None
+    return classify_log(out.splitlines())
+
+
+def qr_mtime():
+    """容器里二维码文件的修改时间（拿不到返回 0）。"""
+    rc, out, _ = _docker("exec", CONTAINER, "stat", "-c", "%Y", QR_FILE, timeout=20)
+    if rc != 0:
+        return 0
+    try:
+        return int(out.strip())
+    except Exception:
+        return 0
+
+
+def qr_fresh(max_age=QR_FRESH_S):
+    """二维码是不是刚生成的（说明此刻正等人扫）。"""
+    m = qr_mtime()
+    return m > 0 and (time.time() - m) <= max_age
+
+
+def recent_relevant_lines(ts, limit=8):
+    """取最近的失效相关日志行，给告警邮件做证据。"""
+    since = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(ts))
+    rc, out, _ = _docker("logs", "--since", since, CONTAINER)
+    if rc != 0:
+        return []
+    hits = []
+    for line in out.splitlines():
+        if classify_log([line]):
+            hits.append(line)
+    return hits[-limit:]
+
+
+
+def _pull_qr():
+    """把容器里的二维码拷到宿主机，返回路径。"""
+    dst = os.path.join(BASE, "memory/last_qr.png")
+    rc, _, _ = _docker("cp", "%s:/app/napcat/cache/qrcode.png" % CONTAINER, dst, timeout=60)
+    return dst if rc == 0 and os.path.exists(dst) else None
+
+
+def _qr_url():
+    """从容器日志里捞最新的二维码解码 URL（手机上可以直接打开跳转 QQ）。"""
+    rc, out, _ = _docker("logs", "--tail", "600", CONTAINER, timeout=60)
+    url = ""
+    for line in out.splitlines():
+        if "二维码解码URL" in line:
+            url = line.split("二维码解码URL:")[-1].strip()
+    return url
+
+
+def _mail_alert(offline_since, attempts, kind="offline", reason=""):
+    """需要人工介入时发一封邮件。这是 QQ 发不出去时唯一还通的外网通道。
+
+    kind="offline"  OneBot 断开（重启没救回来）
+    kind="logout"   WS 连着但 QQ 已退登（假在线，1 个基于 WS 的看护都发现不了）
+    """
+    try:
+        import mailer
+    except Exception as e:
+        return False, "mailer 导入失败: %s" % e
+    mins = max(1, (int(time.time()) - offline_since) // 60)
+    qr = _pull_qr()
+    url = _qr_url()
+
+    if kind == "logout":
+        subject = "【鲸鲸】QQ 登录态失效：她现在回不了话"
+        head = [
+            "OneBot 的 WebSocket 还连着，但 QQ 侧已经不在登录状态。",
+            "也就是说：群里 @ 她、私聊她都不会有反应，",
+            "而「服务还在线」这类看板看上去是正常的。",
+            "",
+            "检测到：%s" % (reason or "登录态失效"),
+            "",
+        ]
+        tail_note = "这个状态不会自愈。看护没去重启容器，" \
+                    "因为重启通常只是换一张新二维码，" \
+                    "还会把你正在扫的那张刷掉。"
+    else:
+        subject = "【鲸鲸掉线】需要重新扫码登录"
+        head = ["鲸鲸的 QQ 掉线了，需要你扫一次码。", ""]
+        tail_note = "自动重启已经试过还是不行，说明保存的 token 已失效。"
+
+    lines = head + [
+        "发现时间：%s" % time.strftime("%F %T", time.localtime(offline_since)),
+        "已持续：%d 分钟" % mins,
+        "自动重启尝试：%d 次" % attempts,
+        "",
+    ]
+    if url:
+        lines += ["在手机上直接打开下面这个链接，会跳到 QQ 授权：",
+                  url, ""]
+    if qr:
+        lines += ["附件是二维码图片，可以扫码。", ""]
+    lines += [
+        tail_note,
+        "",
+        "服务器上也可以手动看状态：",
+        "  python3 /opt/dsh/qqguard.py --status",
+        "",
+        "—— 这是自动发出的告警，不需要回复。",
+    ]
+    ok, why = mailer.send(subject, chr(10).join(lines), [qr] if qr else [])
+    log("邮件告警: %s" % why)
+    return ok, why
+
+
 def _owner_and_bot():
     bot = owner = None
     try:
@@ -150,6 +287,37 @@ def check(apply_=True):
     st = load_state()
     now = int(time.time())
     conn = onebot_connected()
+
+    # ---------- 连着，但 QQ 可能已经退登（假在线）----------
+    if conn:
+        window = int(st.get("logout_since") or st.get("checkpoint") or 0)
+        mark = logout_since(window)
+        waiting_scan = qr_fresh()
+        if mark or waiting_scan:
+            reason = mark or "二维码已生成，等人扫"
+            first = not st.get("logout_since")
+            if first:
+                st["logout_since"] = now
+                log("WS 连着但 QQ 已退登（%s）——这种假在线原来的看护发现不了" % reason)
+            mins = max(1, (now - int(st["logout_since"])) // 60)
+            if st.get("alerted_logout_for") != st["logout_since"]:
+                if not apply_:
+                    log("dry-run：本应发登录失效告警（%s）" % reason)
+                else:
+                    ok, why = _mail_alert(int(st["logout_since"]), 0,
+                                          kind="logout", reason=reason)
+                    if ok:
+                        st["alerted_logout_for"] = st["logout_since"]
+                    else:
+                        log("登录失效告警未发出：%s" % why)
+            save_state(st)
+            return "连着但登录态失效 %d 分钟（%s）" % (mins, reason)
+
+        if st.get("logout_since"):
+            log("登录态已恢复（之前失效 %d 分钟）"
+                % max(1, (now - int(st["logout_since"])) // 60))
+        st["logout_since"] = 0
+        st["alerted_logout_for"] = 0
 
     # ---------- 已恢复 ----------
     if conn:
@@ -203,6 +371,20 @@ def check(apply_=True):
             log("重启后仍需扫码，二维码已生成，等待人工")
             return "仍需扫码（二维码已备好）"
         return "重启后仍未上线"
+
+    # ---------- 需要人工扫码 → 发邮件 ----------
+    # QQ 掉线时出站消息发不出去，邮箱是唯一还通的路。
+    offline_s = now - int(st["offline_since"])
+    if (apply_ and offline_s >= MIN_OFFLINE_S and qr_ready()
+            and st.get("mailed_for") != st["offline_since"]):
+        ok, why = _mail_alert(int(st["offline_since"]), len(st.get("attempts") or []))
+        if ok:
+            st["mailed_for"] = st["offline_since"]
+            save_state(st)
+            return "离线，已发邮件告警（含二维码）"
+        # 没配置邮箱是正常状态，不刷日志
+        if "未配置" not in why:
+            log("邮件告警没发出去: %s" % why)
 
     if len(st["attempts"]) >= MAX_ATTEMPTS_H:
         return "离线，本小时已重启 %d 次，暂停自动恢复，等人工扫码" % len(st["attempts"])
