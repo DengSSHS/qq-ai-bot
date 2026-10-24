@@ -219,6 +219,21 @@ ENVEOF
 umask 022
 ok "qwen.env 写好（600）"
 
+# 掉线告警邮箱（可选）：QQ 掉线时出站消息发不出去，邮箱是唯一还通的路
+if [ -n "${MAIL_PASS:-}" ]; then
+  cat > "$DSH_HOME/mail.env" <<MAILEOF
+SMTP_HOST=${MAIL_HOST:-smtp.qq.com}
+SMTP_PORT=${MAIL_PORT:-465}
+SMTP_USER=${MAIL_USER:-${BOT_QQ}@qq.com}
+SMTP_PASS=${MAIL_PASS}
+MAIL_TO=${MAIL_TO:-${OWNER_QQ}@qq.com}
+MAILEOF
+  chmod 600 "$DSH_HOME/mail.env"
+  ok "掉线告警邮件已配置：${MAIL_USER:-${BOT_QQ}@qq.com} -> ${MAIL_TO:-${OWNER_QQ}@qq.com}"
+else
+  warn "没配 MAIL_PASS，QQ 掉线时不能邮件通知（可选，不影响其它功能）"
+fi
+
 # 7.2 cordis.patch.yml（模板里所有占位符都必须被替换，漏一个就起不来）
 sed -e "s|__LLM_BASE_URL__|${LLM_BASE_URL}|g" \
     -e "s|__LLM_MODEL__|${LLM_MODEL}|g" \
