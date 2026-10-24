@@ -35,16 +35,15 @@
 配置（`deploy.env` 不涉及，直接在 profile 的 `cordis.patch.yml` 里）：
 
 ```yaml
-imageEngageRate: 0.3           # 图片消息单独的概率（未设时回落 casualEngageRate）
 casualEngageRate: 0.2          # 0 = 关闭
 casualEngageCooldownMs: 60000  # 两次接话的最小间隔
 casualEngageMaxPerHour: 3      # 每小时上限
 ```
 
-**图片为什么单独一个概率**：图片比文字贵得多——看一次要 3 秒、几千 token。
-用户要的是“群里别人发的图也能有概率被接住”，但不想因此把文字接话也一起提频。
-所以拆成两个旋钮：文字 20%，图片 30%（配额、冷却、时间格都共用）。
-读不到 `imageEngageRate` 时会回落到 `casualEngageRate`，所以旧配置不会因此变成 0。
+**图片不另设概率**：图片消息和其他群消息一样参与同一次抽取——
+抽中就回（这时会看一眼图），没抽中就不吱声。
+曾试过给图片单独一个 `imageEngageRate`（v0.7.7），后来撤了：
+多一个旋钮就多一处漂移面，而“图和其他消息一样抽”本身就是想要的语义。
 
 **为什么要有小时上限**：纯 20% 逐条掷在活跃群会扎堆——一天 100 条消息就是
 约 20 次接话，而且可能集中在前半小时。所以把一小时切成 `maxPerHour` 个时间格，
