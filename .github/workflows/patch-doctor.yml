@@ -1,0 +1,30 @@
+name: patch-doctor
+
+# 本地对 dsh-onebot-qq 做了 5 处补丁（见 stack/apply_local_patches.py）。
+# 上游一发新版，这些锚点就可能失效，而且失效是静默的（功能悄悄不工作）。
+# 这个 job 每周把上游最新版拉下来，验证 5 处补丁还打不打得上。
+
+on:
+  schedule:
+    - cron: '0 4 * * 1'        # 每周一 04:00 UTC（北京时间 12:00）
+  workflow_dispatch:            # 也能手动跑
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'    # patch_doctor 用 node --check 自检补丁产物
+
+      - name: 检查补丁漂移
+        env:
+          PATCH_DOCTOR_REGISTRY: https://registry.npmjs.org
+        run: python3 stack/patch_doctor.py --ci
+
+      - name: 有漂移时留个注释
+        if: failure()
+        run: |
+          echo "::error::上游插件改版导致本地补丁失配，需要重新锚定 stack/apply_local_patches.py"
