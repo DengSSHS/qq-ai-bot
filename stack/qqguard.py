@@ -27,6 +27,7 @@ import os
 import re
 import subprocess
 import time
+import urllib.request
 
 BASE = "/opt/dsh"
 STATE = os.path.join(BASE, "memory/qqguard.json")
@@ -34,6 +35,7 @@ INCIDENTS = os.path.join(BASE, "memory/qq-incidents.log")
 INJECT = os.path.join(BASE, "media/onebot/qq-inject.jsonl")
 CONF = os.path.join(BASE, "profiles/web/cordis.patch.yml")
 CONTAINER = "napcat"
+ONEBOB_CFG = "/opt/qqbot/data/config/onebot11_3600398389.json"
 
 MAX_ATTEMPTS_H = 3        # 一小时内最多重启几次（防止和风控死磕）
 MIN_OFFLINE_S = 120       # 断线多久才动手（避免网络抖动误伤）
@@ -88,6 +90,80 @@ def _docker(*args, timeout=60):
         return r.returncode, r.stdout.decode("utf-8", "replace"), r.stderr.decode("utf-8", "replace")
     except Exception as e:
         return 1, "", str(e)
+
+
+def _napcat_conf():
+    """读出 NapCat 的 HTTP 端点：容器 IP + 端口 + token。拿不到就返回 None。
+
+    为什么直连容器 IP 而不是 127.0.0.1：HTTP 服务在容器内 0.0.0.0:3000，
+    容器网络是 docker 内网（qqbot_default），宿主机可达，公网碰不到。
+    """
+    try:
+        ip = ""
+        r = subprocess.run(["docker", "inspect", CONTAINER, "--format",
+                            "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}"],
+                           capture_output=True, timeout=20)
+        if r.returncode == 0:
+            ip = r.stdout.decode("utf-8", "replace").strip()
+        if not ip:
+            return None
+        cfg = json.load(open(ONEBOB_CFG, encoding="utf-8"))
+        servers = (cfg.get("network") or {}).get("httpServers") or []
+        for s in servers:
+            if s.get("enable") and s.get("port"):
+                return {"ip": ip, "port": int(s["port"]),
+                        "token": s.get("token") or ""}
+    except Exception as e:
+        log("读 NapCat HTTP 配置失败: %s" % e)
+    return None
+
+
+def send_direct(text, user_id=None):
+    """直接用 OneBot HTTP 接口发私聊。返回 (成功?, 说明)。
+
+    这是 QQ 掉线/退登时唯一可靠的通道——不经过模型、不经过插件自动回发。
+    """
+    conf = _napcat_conf()
+    if not conf:
+        return False, "拿不到 NapCat HTTP 配置（端口没开？）"
+    uid = user_id
+    if not uid:
+        _, uid = _owner_and_bot()
+    if not uid:
+        return False, "读不到主人 QQ 号"
+    url = "http://%s:%d/send_private_msg" % (conf["ip"], conf["port"])
+    body = json.dumps({"user_id": int(uid), "message": text}).encode("utf-8")
+    req = urllib.request.Request(url, data=body, method="POST")
+    req.add_header("Content-Type", "application/json")
+    if conf["token"]:
+        req.add_header("Authorization", "Bearer " + conf["token"])
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            d = json.loads(r.read().decode("utf-8"))
+        if d.get("status") == "ok" and d.get("retcode") == 0:
+            return True, "已发到 %s（message_id %s）" % (
+                uid, (d.get("data") or {}).get("message_id"))
+        return False, "接口返回异常: %s" % json.dumps(d, ensure_ascii=False)[:160]
+    except Exception as e:
+        return False, "发送失败: %s" % e
+
+
+def online_confirmed():
+    """用 OneBot HTTP 问一句"你到底在不在线"，比看 WS 和日志都准。"""
+    conf = _napcat_conf()
+    if not conf:
+        return None
+    url = "http://%s:%d/get_status" % (conf["ip"], conf["port"])
+    req = urllib.request.Request(url)
+    if conf["token"]:
+        req.add_header("Authorization", "Bearer " + conf["token"])
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            d = json.loads(r.read().decode("utf-8"))
+        data = d.get("data") or {}
+        return bool(data.get("online")) and bool(data.get("good"))
+    except Exception:
+        return None
 
 
 def onebot_connected():
@@ -328,11 +404,23 @@ def check(apply_=True):
                 mins = max(1, down // 60)
                 text = ("主人，我刚才掉线了差不多 %d 分钟，期间的消息可能没回。现在")
                 text = (text % mins) + "已经连回来了。"
-                if apply_ and inject(text):
-                    log("已恢复，掉线 %d 分钟，已告知主人" % mins)
+                # 优先直连发送：不经过她，也不依赖插件自动回发。
+                # （2026-10-24 教训：注入通道的消息不会发到 QQ，日志却写"已告知"）
+                done = False
+                if apply_:
+                    ok, why = send_direct(text)
+                    if ok:
+                        log("已恢复，掉线 %d 分钟，已直接发到 QQ（%s）" % (mins, why))
+                        done = True
+                    else:
+                        log("直连发送失败（%s），改用注入通道" % why)
+                        if inject(text):
+                            log("已恢复，掉线 %d 分钟，已注入（不保证真的发到了 QQ）" % mins)
+                            done = True
+                if done:
                     st["reported_for"] = st["offline_since"]
                 else:
-                    log("已恢复，掉线 %d 分钟（未发通知）" % mins)
+                    log("已恢复，掉线 %d 分钟，但通知未发出" % mins)
             else:
                 log("已恢复，掉线 %d 秒" % down)
         st["offline_since"] = 0
