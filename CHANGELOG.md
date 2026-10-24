@@ -2,6 +2,56 @@
 
 本项目按「改了什么 + 为什么」记录，不按版本号堆功能。所有日期为实际改动日期。
 
+## v0.5.0 — 2026-10-24 · 把本地 fork 显式化（vendor）
+
+### 先纠正一个认知：这不是"原版 + 5 处补丁"
+
+查上游漂移时发现，线上这个插件**本身就是 fork**：
+
+```
+lib/bridge.js   +151 行  上游用 buildPlatformPrompt，fork 用 buildPromptParts
+                         并且多传了 stickerStore
+lib/prompt.js   +126 行  「Local patch: the QQ channel now owns the identity/persona」
+```
+
+而 `package.json` 的版本号仍写着 `0.9.3`——所以**从外面完全看不出来已经分叉**。
+
+后果很实在：`npm install` 只认版本号，会把 registry 原版覆盖上来，约 500 行
+改动**静默消失**，且零报错。这一整天我们反复遇到的"改了但没生效"，根因之一是
+这个：改的是快照，跑的是 npm 装的原版。
+
+相对 registry 0.9.3 的实际偏移：**+493 / -37 行**。
+
+### vendor 化
+
+```
+vendor/fork-YYYYMMDD/       lib/ + package.json 的完整快照
+vendor/patches/*.patch      相对上游的完整 diff（用于审阅与合并参考）
+vendor/install_fork.sh      装回 node_modules，带语法自检与 --check 对比
+```
+
+`install.sh` 在 `npm install` 之后自动调用——**这一步不能省，npm 会覆盖 lib/**。
+
+实测：
+
+```
+--check        → 一致时 OK，被覆盖时列出缺失文件
+删掉 cq.js     → --check 报 DIFF
+install_fork   → 一键恢复 + 语法自检通过
+重建后起服务   → active、OneBot 已连接、5 处补丁在位、6 个 MCP 子进程
+```
+
+### 升级语义变了，写进文档
+
+```
+原来以为：升级 = 让我们 5 处补丁适配新锚点
+实际是：  升级 = fork 合并（我们改过、上游也改过）
+```
+
+已核实的上游漂移：0.9.6 里 `prompt.js` 从 96 行缩到 31 行（`readPersona()` 搬走）、
+`bridge.js` 的时间拼装没了、`index.js` 的 `groupActivationMinutes` 挪位。
+所以短期内**不升级**是合理选择，等需要上游修复时再做一次正式合并。
+
 ## v0.4.3 — 2026-10-24 · 补丁漂移检测
 
 本地对 `dsh-onebot-qq` 已有 5 处补丁（`node_modules` 里），锚点全是上游源码的

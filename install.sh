@@ -260,6 +260,16 @@ cd "$DSH_HOME/profiles/web"
 #   所以按线上的实际解析方式装，而不是让 npm 判死刑。
 run "$NODE_DIR/bin/npm" install --legacy-peer-deps --registry="$NPM_REG"     || die "装 profile 依赖失败（网络问题可换 NPM_REG）"
 ok "profile 依赖装好"
+# npm 会用 registry 原版覆盖 lib/，我们这套是 fork（约 500 行改动）。
+# 部署包里带了 vendor 快照就必须重装回去，否则所有本地改动静默消失。
+if [ -x "$STACK/vendor/install_fork.sh" ]; then
+  VENDOR_DIR="$DSH_HOME/vendor"
+  if [ -d "$VENDOR_DIR" ]; then
+    bash "$STACK/vendor/install_fork.sh" || warn "fork 快照装入失败，插件可能是原版行为"
+  else
+    warn "没有 $VENDOR_DIR，用 registry 原版插件（本地 fork 功能不可用）"
+  fi
+fi
 # npm 会把 local-memory 复制进 node_modules，**运行时读的是那一份**。
 # 只改 profiles/web/local-memory 的话，占位符照样进 MCP 配置，
 # 看图请求会发到 "__VISION_BASE__/chat/completions" —— 她从此看不见任何图片。
