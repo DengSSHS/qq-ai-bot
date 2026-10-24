@@ -236,11 +236,37 @@ def patch_index(apply_):
     return "已打"
 
 
+
+# ---------------------------------------------------------------- 5) cq.js
+FACE_OLD = """export function faceToEmoji(id) {
+    return FACE_EMOJI[id] ?? '😀';
+}"""
+
+FACE_NEW = """export function faceToEmoji(id) {
+    // 未知 id 不要兜底成笑脸：表里只收了两百来个，QQ 还有几百个，
+    // 一律映射成 😀 会让她"看到不存在的笑"。宁可老实说认不出。
+    return FACE_EMOJI[id] ?? '[表情]';
+}"""
+
+
+def patch_cq(apply_):
+    p = os.path.join(LIB, "cq.js")
+    s = rd(p)
+    if "'[表情]'" in s and 'faceToEmoji' in s:
+        return "已打"
+    if FACE_OLD not in s:
+        return "跳过（找不到目标函数）"
+    if not apply_:
+        return "未打"
+    wr(p, s.replace(FACE_OLD, FACE_NEW, 1))
+    return "已打"
+
 PATCHES = [
     ("prompt.js  长期记忆注入", patch_prompt),
     ("bridge.js  时间挪到后缀（前缀缓存）", patch_bridge),
     ("inbound.js 主动接话概率门", patch_inbound),
     ("index.js   配置 schema + 透传", patch_index),
+    ("cq.js      未知表情兜底成 [表情]", patch_cq),
 ]
 
 
@@ -264,7 +290,7 @@ def main():
     # 语法自检
     node = "/opt/node/bin/node"
     if os.path.exists(node):
-        for f in ("prompt.js", "bridge.js", "inbound.js", "index.js"):
+        for f in ("prompt.js", "bridge.js", "inbound.js", "index.js", "cq.js"):
             r = subprocess.run([node, "--check", os.path.join(LIB, f)],
                                capture_output=True)
             if r.returncode != 0:
