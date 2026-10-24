@@ -32,6 +32,8 @@ MIME = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
 MAX_BYTES = 8 * 1024 * 1024
 RECENT_WINDOW = 300  # 秒：只认最近收到的图
 ENVF = "/opt/dsh/qwen.env"
+CACHEF = "/opt/dsh/memory/vision_cache.json"
+CACHE_MAX = 300  # 最多记多少张（超出丢最旧的）
 def _envfile(key):
     """从 qwen.env 读一个键（systemd 的 EnvironmentFile 只对服务生效，
     用 python3 直接跑的脚本拿不到，所以这里自己兜一层）。
@@ -153,6 +155,54 @@ def _ask_model(path, question):
     return txt, None
 
 
+def _cache_key(path):
+    """同一张图 -> 同一个 key。文件被替换（大小/mtime 变了）就换 key。"""
+    try:
+        st = os.stat(path)
+    except Exception:
+        return ""
+    return "%s|%d|%d" % (path, st.st_size, int(st.st_mtime))
+
+
+def _cache_load():
+    try:
+        with open(CACHEF, encoding="utf-8") as f:
+            d = json.load(f)
+        if isinstance(d, dict):
+            return d
+    except Exception:
+        pass
+    return {}
+
+
+def _cache_get(key):
+    d = _cache_load()
+    hit = d.get(key)
+    if isinstance(hit, dict) and hit.get("text"):
+        return hit["text"]
+    return None
+
+
+def _cache_put(key, text):
+    """写入并保持条目数上限（按时间旧->新丢）。"""
+    if not key or not text:
+        return
+    d = _cache_load()
+    d[key] = {"text": text, "ts": int(time.time())}
+    if len(d) > CACHE_MAX:
+        old = sorted(d.items(), key=lambda kv: kv[1].get("ts") or 0)
+        for k, _ in old[: len(d) - CACHE_MAX]:
+            d.pop(k, None)
+    try:
+        os.makedirs(os.path.dirname(CACHEF), exist_ok=True)
+        tmp = CACHEF + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(d, f, ensure_ascii=False)
+        os.replace(tmp, CACHEF)
+    except Exception as e:
+        log("cache write fail: %s" % e)
+
+
 def image_view(args):
     path = (args.get("path") or "").strip()
     question = (args.get("question") or "").strip()
@@ -181,6 +231,15 @@ def image_view(args):
     if os.path.getsize(path) > MAX_BYTES:
         return "图太大了（超过 8MB），看不了。"
 
+    # 同一张图只看一次：文件没变就复用上次的结论，不重复消耗视觉额度
+    key = _cache_key(path)
+    cached = _cache_get(key) if key else None
+    if cached and not question:
+        return cached
+    if cached and question:
+        # 换了问题就不再复用（问题不同答案不同），但也别重复烧钱——让模型基于缓存答
+        return cached + chr(10) + chr(10) + "（这张之前看过，上面是上次的结论。你问的「%s」如果上面没提到，就直说没看清这部分。）" % question
+
     try:
         ans, err = _ask_model(path, question)
     except Exception as e:
@@ -190,6 +249,7 @@ def image_view(args):
         return err
     if not ans:
         return "图加载出来了，但没读出内容，再说一次或者重发一张。"
+    _cache_put(key, ans)
     return ans
 
 

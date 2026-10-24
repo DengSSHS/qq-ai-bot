@@ -235,7 +235,7 @@ persona/
   TEMPLATE.md       人设骨架（{{占位符}}，按描述填）
   example-jingjing.md  示例角色（151 行，可直接用）
 stack/              运行时主体：27 个 Python 脚本（7 个 MCP + 定时任务 + 工具）+ 配置模板 + systemd
-tests/              114 个单元测试（纯函数 + 安全边界 + 解析兜底）
+tests/              121 个单元测试（纯函数 + 安全边界 + 解析兜底）
 scripts/            preflight 的 Python 侧检查 + 生成 README 配图
 .github/workflows/  CI：语法、密钥扫描、换行、占位符、单元测试
 ```
@@ -269,5 +269,5 @@ Python **3.8+**，零第三方依赖（`requirements.txt` 只有说明）。
 
 ## 版本与许可
 
-当前 `0.7.2`（见 `VERSION`），改动记录在 `CHANGELOG.md`。
+当前 `0.7.3`（见 `VERSION`），改动记录在 `CHANGELOG.md`。
 MIT，见 `LICENSE`；第三方出处与角色形象版权说明见 `NOTICE.md`。
