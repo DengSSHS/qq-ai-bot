@@ -2,6 +2,66 @@
 
 本项目按「改了什么 + 为什么」记录，不按版本号堆功能。所有日期为实际改动日期。
 
+## v0.4.0 — 2026-10-24 · 主动说话（群聊接话 + 私聊累积概率）
+
+### 群聊：每条消息 20% 被她"接住"
+
+原本未 @ 她的群消息被直接丢弃。现在多一道概率门：
+
+```
+未 @ + 不在激活窗口 → 掷 20%
+  命中 → 当作她想接一句，继续走完管线
+  未中 → 照旧丢弃
+```
+
+三个约束：
+
+- **不写入激活窗口**。接住的只有当前这一条，说完就结束，那个群友下次说话
+  仍需 @ ——她不是掺进对话，而是插一句就走
+- 同群冷却 60 秒，连着刷三条不会三条都被接
+- 这一轮带标记：`[主动插话] 这条没人 @ 你…先看最近群聊（不够就调
+  qq_group_history 拉 10 条），再简短接一句，别追问、别把话头接成长对话`
+
+### 私聊：概率随时间累积
+
+`proactive.py` 新增累积型 routine（`routines.json` 的 `casual_dm`）：
+
+```
+概率 = rampPerHour × (1 + 超出 minIdle 的小时数)，封顶 rampCap
+默认：每小时 +20%、封顶 80%、要求空闲 ≥60 分钟、窗口 08:30–23:30
+```
+
+**是累积不是纯随机**：同一小时内用小时桶哈希掷一次，所以「1 小时 20%、
+2 小时 40%、3 小时 60%」真的在涨，而不是每 10 分钟重投骰子。
+
+### 新增：apply_local_patches.py
+
+现在有四处改动落在 `node_modules` 里（prompt.js 记忆注入、bridge.js 时间后缀、
+inbound.js 接话门、index.js schema 与透传）。`npm install` 或升级就丢，且丢了
+不报错。新增幂等补丁脚本，带 `node --check` 自检：
+
+```bash
+python3 /opt/dsh/apply_local_patches.py --check   # 看状态
+python3 /opt/dsh/apply_local_patches.py           # 重打
+```
+
+### 修掉一个静默失败 229 次的服务
+
+`proactive.py` 里 `OWNER = __OWNER_QQ__` 从未被替换，`proactive.service`
+每 10 分钟 `NameError`，**连续失败 229 次**。后果：日记提醒
+（morning/noon/evening/night）从 10-22 之后全部没触发，那两天她因此没有日记。
+
+`install.sh` 本来有统一替换（遍历 `$DSH_HOME/*.py`），是这台机器更早的安装没跑那段。
+
+教训：**`list-timers` 显示 active 不代表跑得通**，新装完要 `systemctl status`
+看一眼有没有在失败。
+
+### 踩的坑：配置键被白名单吞掉
+
+插件把配置传给 pipeline 要过 `gateConfig` 白名单，只挑固定几个键。加了 zod
+schema 还不够——不在那个对象里的键，pipeline 读到的永远是 `undefined`，
+概率门就静默失效。表现是 `rate=undefined`，行为退回原样，没有任何报错。
+
 ## v0.3.2 — 2026-10-24 · QQ 掉线自愈 + 邮件告警
 
 ### 问题：断了 12 小时，没人知道

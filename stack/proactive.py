@@ -128,6 +128,45 @@ def main():
 
     for r in cfg.get("routines", []):
         rid = r["id"]
+        ramp = float(r.get("rampPerHour", 0) or 0)
+
+        # ---- 累积型（主动私聊）：每次检查都算，不受"每天固定分钟"限制 ----
+        # 概率 = rampPerHour × (1 + 超出 minIdle 的小时数)，封顶 rampCap。
+        # 同一小时内掷一次（用小时桶哈希），所以是"随时间累积"而不是每分钟重掷。
+        if ramp > 0:
+            need_min = int(r.get("minIdleMin", 60))
+            if idle < need_min:
+                if dry:
+                    print("[%s] 刚聊过（%.0f 分钟前 < %d），不打扰" % (rid, idle, need_min))
+                continue
+            cap = float(r.get("rampCap", 0.8))
+            hours = max(0.0, (idle - need_min) / 60.0)
+            prob = min(cap, ramp * (1 + hours))
+            hour_bucket = now.strftime("%Y-%m-%dT%H")
+            h = int(hashlib.sha256((hour_bucket + rid).encode()).hexdigest()[:8], 16)
+            roll = (h % 1000) / 1000.0
+            if dry:
+                print("[%s] 空闲 %.0f 分钟｜本轮概率 %.0f%%｜掷出 %.2f -> %s"
+                      % (rid, idle, prob * 100, roll, "会发" if roll < prob else "不发"))
+            if roll >= prob:
+                continue
+            if st["fired"].get(rid + "@" + hour_bucket):
+                continue
+            if st["count"] >= budget:
+                if dry:
+                    print("[%s] 今日预算已用完（%d）" % (rid, budget))
+                break
+            if dry:
+                print("     内容：%s" % r["prompt"][:60])
+                continue
+            inject(r["prompt"])
+            st["fired"][rid + "@" + hour_bucket] = now.isoformat()
+            st["count"] += 1
+            log("fired %s at %s (idle=%.0fm prob=%.2f count=%d)"
+                % (rid, now.strftime("%H:%M"), idle, prob, st["count"]))
+            continue
+
+        # ---- 固定型（日记提醒等）：窗口内按日期哈希取一个分钟，到点发一次 ----
         fm = fire_minute(r, day)
         planned = "%02d:%02d" % (fm // 60, fm % 60)
         if now_min < fm:
