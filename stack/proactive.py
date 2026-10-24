@@ -116,6 +116,7 @@ def main():
 
     cfg = load_json(ROUTINES, {"dailyBudget": 4, "routines": []})
     budget = int(cfg.get("dailyBudget", 4))
+    MAX_CASUAL_DM = 6   # 主动私聊单独上限，避免一天刷屏
     st = load_json(STATE, {})
     if st.get("day") != day:
         st = {"day": day, "fired": {}, "count": 0}
@@ -128,6 +129,12 @@ def main():
 
     for r in cfg.get("routines", []):
         rid = r["id"]
+        # switch.py off 会打上 off 标记，这里必须尊重它 ——
+        # 否则开关只是改了个字段，行为一点没变（这类"改了没生效"今天踩太多次了）
+        if r.get("off"):
+            if dry:
+                print("[%s] 已停用（switch.py off）" % rid)
+            continue
         ramp = float(r.get("rampPerHour", 0) or 0)
 
         # ---- 累积型（主动私聊）：每次检查都算，不受"每天固定分钟"限制 ----

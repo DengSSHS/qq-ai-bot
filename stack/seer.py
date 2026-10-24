@@ -32,8 +32,25 @@ MIME = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
 MAX_BYTES = 8 * 1024 * 1024
 RECENT_WINDOW = 300  # 秒：只认最近收到的图
 ENVF = "/opt/dsh/qwen.env"
-BASE = os.environ.get("VISION_BASE", "https://api.deepseek.com")   # 部署时用环境变量覆盖
-MODEL = os.environ.get("VISION_MODEL", "deepseek-v4.1-flash-1017")
+def _envfile(key):
+    """从 qwen.env 读一个键（systemd 的 EnvironmentFile 只对服务生效，
+    用 python3 直接跑的脚本拿不到，所以这里自己兜一层）。
+
+    踩过的坑：seer 的默认 BASE 是纯文本接口，systemd 定时任务没有
+    VISION_BASE 时会 401，而失败信息只是"判断异常"，看不出是配置问题。
+    """
+    try:
+        for line in open(ENVF, encoding="utf-8"):
+            if line.startswith(key + "="):
+                return line.split("=", 1)[1].strip()
+    except Exception:
+        pass
+    return None
+
+
+BASE = os.environ.get("VISION_BASE") or _envfile("VISION_BASE") or "https://api.deepseek.com"   # 部署时用环境变量覆盖
+MODEL = (os.environ.get("VISION_MODEL") or _envfile("VISION_MODEL")
+         or "deepseek-v4.1-flash-1017")
 LOG = "/opt/dsh/memory/vision.log"
 PROTO = "2024-11-05"
 

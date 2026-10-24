@@ -754,6 +754,16 @@ def _parse_triage_reply(ans):
     return False, _clean_scene_name(txt), None, txt[:60].replace("\n", " ")
 
 
+def _screen_enabled():
+    """图片内容风险筛查是否开启（switch.py 的 content_screening 开关）。
+
+    默认开启。关掉后不再问模型"适不适合转发"，safe 记为 None（未判断），
+    于是所有通过"值得收"的图都会进 pending。
+    """
+    v = (os.environ.get("STICKER_SCREEN_SAFE") or "1").strip().lower()
+    return v not in ("0", "false", "no", "off")
+
+
 def _triage_one(path):
     """一次模型调用，返回 (值得收?, 场景, 理由)。"""
     try:
@@ -762,7 +772,10 @@ def _triage_one(path):
         ans, err = seer._ask_model(path, q)
         if err or not ans:
             return None, "", None, err or "模型没返回"
-        return _parse_triage_reply(ans)
+        worth, scene, safe, reason = _parse_triage_reply(ans)
+        if not _screen_enabled():
+            safe = None          # 开关关闭：不做内容判断，safe 记为未判断
+        return worth, scene, safe, reason
     except Exception as e:
         return None, "", None, "判断异常: %s" % e
 

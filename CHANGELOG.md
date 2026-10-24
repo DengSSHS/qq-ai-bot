@@ -2,6 +2,55 @@
 
 本项目按「改了什么 + 为什么」记录，不按版本号堆功能。所有日期为实际改动日期。
 
+## v0.6.0 — 2026-10-24 · 开关面板 + 修一个自己引入的回归
+
+### switches.py：一个命令开关所有行为
+
+原来要调一个行为，得知道改哪个文件、要不要重启：
+
+```
+systemd 定时器      systemctl enable/disable
+cordis.patch.yml    改键 + restart dsh-onebot
+routines.json       改 JSON、认条目名
+```
+
+现在：
+
+```bash
+python3 switch.py                # 列出现状
+python3 switch.py off casual_dm  # 关掉私聊主动
+python3 switch.py on  budget_breaker
+```
+
+11 个开关，四种插槽（`timer` / `config` / `routine` / `budget` / `env`）。
+加新开关只需往 `FEATURES` 追加一条。改文件前自动备份、改完校验、校验失败回滚。
+
+### 踩坑：开关改了但行为没变
+
+`routine` 和 `env` 两类最初只改标记，**代码没读**：`casual_dm` 打了 `off: true`，
+`proactive.py` 照旧跑。补了两处读取逻辑（`r.get("off")` / `_screen_enabled()`）。
+
+这是本项目最顽固的一类 bug——**开关面板如果只改配置不接行为，本身就是骗人的**。
+
+### 修：我引入的一个回归（vision 401）
+
+为了让开源版不带私有地址，我把 `seer.py` 的默认 `BASE` 改成了
+`https://api.deepseek.com`。但 MCP 子进程的 `VISION_BASE` 来自插件配置，
+**systemd 定时任务没有**——于是 `sticker-settle` 和 `memory-distill`
+在任何真实看图调用上都会 401。
+
+这个回归很隐蔽：`sticker-settle` 今天跑过两次都没报错（因为当时没有新图可判，
+压根没调模型）；明天 03:00 第一次有图要判时才会炸。
+
+两层修复：
+
+1. `seer.py` 自己从 `qwen.env` 兜底读 `VISION_BASE`/`VISION_MODEL` —— 这样
+   任何 `python3 x.py` 的调用方式都不会踩，包括以后新加的定时任务
+2. `sticker-settle.service` / `memory-distill.service` 补上
+   `EnvironmentFile=/opt/dsh/qwen.env`（双保险）
+
+验证：不带任何环境变量直接调 `_triage_one` → `值得收=True safe=True`，正常。
+
 ## v0.5.0 — 2026-10-24 · 把本地 fork 显式化（vendor）
 
 ### 先纠正一个认知：这不是"原版 + 5 处补丁"
