@@ -53,6 +53,26 @@ LLM_BASE_URL="${LLM_BASE_URL:-}"; LLM_MODEL="${LLM_MODEL:-}"; LLM_API_KEY="${LLM
 VISION_BASE="${VISION_BASE:-$LLM_BASE_URL}"
 VISION_MODEL="${VISION_MODEL:-$LLM_MODEL}"
 VISION_API_KEY="${VISION_API_KEY:-$LLM_API_KEY}"
+
+# 可选：密码快速登录。填了就不用每次登录态失效都扫码。
+# 优先用 MD5（明文不落盘）。两者都填时只取 MD5。
+NAPCAT_QUICK_PASSWORD="${NAPCAT_QUICK_PASSWORD:-}"
+NAPCAT_QUICK_PASSWORD_MD5="${NAPCAT_QUICK_PASSWORD_MD5:-}"
+PWD_ENV=""
+if [ -n "$NAPCAT_QUICK_PASSWORD_MD5" ]; then
+  case "$NAPCAT_QUICK_PASSWORD_MD5" in
+    *[!0-9a-fA-F]*)
+      die "NAPCAT_QUICK_PASSWORD_MD5 应只有 0-9a-f" ;;
+  esac
+  if [ "${#NAPCAT_QUICK_PASSWORD_MD5}" -ne 32 ]; then
+    die "NAPCAT_QUICK_PASSWORD_MD5 应该是 32 位，现在是 ${#NAPCAT_QUICK_PASSWORD_MD5} 位"
+  fi
+  PWD_ENV="      NAPCAT_QUICK_PASSWORD_MD5: \"$NAPCAT_QUICK_PASSWORD_MD5\""
+  ok "NapCat 已配置密码重登（MD5）"
+elif [ -n "$NAPCAT_QUICK_PASSWORD" ]; then
+  PWD_ENV="      NAPCAT_QUICK_PASSWORD: \"$NAPCAT_QUICK_PASSWORD\""
+  warn "NapCat 用明文密码登，密码会写进 /opt/qqbot/compose.yaml（建议改用 MD5）"
+fi
 # 纯文本接口看不了图，而且失败得很安静（她只会说"看不到"）。装之前就讲清楚。
 case "$VISION_BASE" in
   *api.deepseek.com*)
@@ -324,6 +344,7 @@ services:
       ACCOUNT: "${BOT_QQ}"
       WEBUI_TOKEN: "${NAPCAT_WEBUI_TOKEN}"
       TZ: Asia/Shanghai
+${PWD_ENV}
     ports:
       - "127.0.0.1:6099:6099"
       - "127.0.0.1:3001:3001"
