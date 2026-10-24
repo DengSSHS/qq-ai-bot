@@ -34,6 +34,8 @@ RECENT_WINDOW = 300  # 秒：只认最近收到的图
 ENVF = "/opt/dsh/qwen.env"
 CACHEF = "/opt/dsh/memory/vision_cache.json"
 CACHE_MAX = 300  # 最多记多少张（超出丢最旧的）
+CALLS = "/opt/dsh/memory/vision_calls.json"
+MAX_PER_HOUR = 12  # 每小时最多真正调几次视觉模型（缓存命中不计）
 def _envfile(key):
     """从 qwen.env 读一个键（systemd 的 EnvironmentFile 只对服务生效，
     用 python3 直接跑的脚本拿不到，所以这里自己兜一层）。
@@ -203,6 +205,37 @@ def _cache_put(key, text):
         log("cache write fail: %s" % e)
 
 
+def _calls_load():
+    try:
+        with open(CALLS, encoding="utf-8") as f:
+            d = json.load(f)
+        if isinstance(d, list):
+            return [int(x) for x in d if isinstance(x, (int, float))]
+    except Exception:
+        pass
+    return []
+
+
+def _calls_recent():
+    """最近一小时内真正调用模型的次数。"""
+    now = time.time()
+    return [t for t in _calls_load() if now - t < 3600]
+
+
+def _calls_record():
+    now = time.time()
+    keep = [t for t in _calls_load() if now - t < 3600]
+    keep.append(now)
+    try:
+        os.makedirs(os.path.dirname(CALLS), exist_ok=True)
+        tmp = CALLS + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(keep, f)
+        os.replace(tmp, CALLS)
+    except Exception as e:
+        log("calls write fail: %s" % e)
+
+
 def image_view(args):
     path = (args.get("path") or "").strip()
     question = (args.get("question") or "").strip()
@@ -240,6 +273,13 @@ def image_view(args):
         # 换了问题就不再复用（问题不同答案不同），但也别重复烧钱——让模型基于缓存答
         return cached + chr(10) + chr(10) + "（这张之前看过，上面是上次的结论。你问的「%s」如果上面没提到，就直说没看清这部分。）" % question
 
+    # 硬上限：群图逐张识别会把额度烧穿，这里兜底（缓存命中在上面已经返回，不计）
+    used = len(_calls_recent())
+    if used >= MAX_PER_HOUR:
+        return ("这一小时已经看过 %d 张图，到上限了，先不看新的。"
+                "跟发图的人说一声「这张我先存着，晚点再看」，别说自己不会看图。"
+                % used)
+
     try:
         ans, err = _ask_model(path, question)
     except Exception as e:
@@ -250,6 +290,7 @@ def image_view(args):
     if not ans:
         return "图加载出来了，但没读出内容，再说一次或者重发一张。"
     _cache_put(key, ans)
+    _calls_record()
     return ans
 
 
