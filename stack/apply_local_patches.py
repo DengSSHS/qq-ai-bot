@@ -92,21 +92,39 @@ const CASUAL_ENGAGE_HINT = '[主动插话] 这条没人 @ 你，是你自己看�
 
 CASUAL_GATE = """        // 主动接话：每条未 @ 她的群消息都有一个小概率被她"接住"。
         // 只算这一条，不写进 groupActiveUsers —— 接完就结束，下次还得 @。
+        // 每小时配额 + 均匀分布：把一小时切成 maxPerHour 个时间格，每格最多一次，
+        // 所以既不会一小时刷十几次，也不会在开头几分钟把配额用光。
         let casualEngage = false;
         if (kind === 'group' && this.ctx.config.requireMention && !mentioned && !activationActive) {
             const rate = Number(this.ctx.config.casualEngageRate ?? 0);
             const cooldown = Number(this.ctx.config.casualEngageCooldownMs ?? 0);
+            const maxPerHour = Math.max(1, Number(this.ctx.config.casualEngageMaxPerHour ?? 3));
             const last = this.casualEngageAt?.get(chatId) ?? 0;
             const cooling = cooldown > 0 && Date.now() - last < cooldown;
-            if (rate > 0 && !cooling && Math.random() < rate) {
+            const now = Date.now();
+            const hourIdx = Math.floor(now / 3600000);
+            const slotMs = Math.floor(3600000 / maxPerHour);
+            const slotIdx = Math.floor(now / slotMs);
+            if (!this.casualQuota)
+                this.casualQuota = new Map();
+            let q = this.casualQuota.get(chatId);
+            if (!q || q.hour !== hourIdx) {
+                q = { hour: hourIdx, used: new Set() };
+                this.casualQuota.set(chatId, q);
+            }
+            if (q.used.size > maxPerHour * 4)
+                q.used.clear();
+            const slotFree = !q.used.has(slotIdx);
+            if (rate > 0 && !cooling && slotFree && Math.random() < rate) {
                 casualEngage = true;
-                if (!this.casualEngageAt)
-                    this.casualEngageAt = new Map();
-                this.casualEngageAt.set(chatId, Date.now());
-                currentTrace()?.emit('mention', { ok: true, reason: '主动接话（概率命中）', chatId });
+                q.used.add(slotIdx);
+                this.casualEngageAt.set(chatId, now);
+                currentTrace()?.emit('mention', { ok: true,
+                    reason: '主动接话（第 ' + q.used.size + '/' + maxPerHour + ' 格）', chatId });
             }
             else {
-                this.ctx.log('debug', 'ignoring unmentioned group message in ' + groupId);
+                this.ctx.log('debug', 'ignoring unmentioned group message in ' + groupId
+                    + (slotFree ? '' : '（本格配额已用）'));
                 currentTrace()?.emit('mention', { ok: false, reason: TRACE_REASONS.inboundUnmentioned });
                 return;
             }
@@ -123,10 +141,13 @@ SCHEMA_KEYS = """    casualEngageRate: z.number().min(0).max(1).default(0)
             + '不写入激活窗口（接完就结束，下次仍需 @）；0 = 关闭'),
     casualEngageCooldownMs: z.number().default(60000)
         .description('同一群两次主动接话的最小间隔（毫秒）'),
+    casualEngageMaxPerHour: z.number().min(1).default(3)
+        .description('主动接话每小时上限：把一小时切成这么多时间格，每格最多接一次'),
 """
 
 GATE_KEYS = """        casualEngageRate: config.casualEngageRate,
         casualEngageCooldownMs: config.casualEngageCooldownMs,
+        casualEngageMaxPerHour: config.casualEngageMaxPerHour,
 """
 
 
@@ -180,6 +201,13 @@ def patch_inbound(apply_):
         return "未打"
     s = s.replace(imp, imp + chr(10) + chr(10) + CASUAL_CONST, 1)
     s = s.replace(old_gate, CASUAL_GATE, 1)
+    # 概率门要用到两个 Map，必须声明成类字段（否则 this.casualQuota 是 undefined）
+    field_anchor = "    groupActiveUsers = new Map();"
+    if field_anchor in s and 'casualQuota = new Map();' not in s:
+        s = s.replace(field_anchor, field_anchor + chr(10)
+                      + "    // 主动接话状态：上次接话时间 / 本小时已用的时间格（casualQuota 字段）" + chr(10)
+                      + "    casualEngageAt = new Map();" + chr(10)
+                      + "    casualQuota = new Map();", 1)
     hook = """        if (kind === 'group') {
             final = buildGroupMessagePrefix(nickname, userId, mentioned) + final;"""
     if hook in s:
