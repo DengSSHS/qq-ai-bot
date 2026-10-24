@@ -18,7 +18,8 @@
   「安装细节」；架构图配可折叠文字版；加可折叠目录。
 
 自验：`preflight.sh` 71 passed / 0 failed（1 warning 是 pyyaml 未装跳过 YAML 解析），
-`tests/` 106 passed。**干净机部署未复验**——本次没动部署逻辑。
+`tests/` 106 passed（skipped=3），`deploy.sh` 在沙箱里过了 6 个分支（缺配置/空值/CRLF/非法 QQ 号/
+占位符残留/verify 失败透传）。**干净机上的完整部署未复验**——本次没动部署逻辑。
 
 ## v0.7.0 — 2026-10-24 · B 站能力（可选模块）
 
@@ -520,7 +521,8 @@ Conflicting peer dependency: @deepseek-ai/dsh-llm@0.2.0-rc.2
 改 `install.sh` 时用文本模式写盘，在 Windows 上把 `
 ` 写成了 `
 `，
-容器里 bash 直接报 `syntax error near unexpected token 'in'`。
+容器里 bash 直接报 `syntax error near unexpected token 'in
+'`。
 已统一为 LF（preflight 里有专门检查这条）。
 
 ### 干净环境验证结果
