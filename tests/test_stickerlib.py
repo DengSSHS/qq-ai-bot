@@ -83,8 +83,17 @@ class Picking(Base):
         self.assertGreater(cold, 0, "冷门表情一次都没被挑中——加权过猛，退化成垄断")
 
     def test_scene_filter(self):
+        # 2026-10-25 行为变更：scene 不匹配不再返回「一张都没有」，而是退回全库挑，
+        # 并告诉模型可用分类名。原因：人设让模型传自然语言（「群里有人在开玩笑」），
+        # 旧行为直接过滤空 → 模型放弃发图 → 一天 76 条发送、表情 0 条。
         out = stickerlib.pick({"scene": "不存在的场景"})
-        self.assertIn("一张都没有", out)
+        self.assertIn("挑到", out)
+        self.assertIn("没对上任何分类", out)
+
+    def test_scene_filter_still_excludes_when_scene_matches(self):
+        out = stickerlib.pick({"scene": "卖萌可爱"})
+        self.assertIn("挑到", out)
+        self.assertNotIn("没对上任何分类", out)
 
     def test_query_filter(self):
         out = stickerlib.pick({"query": "表情3"})

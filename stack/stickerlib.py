@@ -222,40 +222,56 @@ def pick(args):
         return "表情库读不到（stickers.json 为空或缺失）。"
 
     now = time.time()
-    pool = []
-    for s in stickers:
-        if not isinstance(s, dict):
-            continue
-        sid = s.get("id")
-        if not sid:
-            continue
-        meta = tags.get(sid) or {}
-        s_scene = meta.get("scene") or ""
-        if scene and scene not in s_scene:
-            continue
-        if query:
-            hay = " ".join([str(s.get("name") or ""), s_scene,
-                            str(meta.get("text") or "")])
-            if query.lower() not in hay.lower():
+
+    def _build(use_scene):
+        """按条件筛出一池候选；use_scene 为空表示不按场景筛。"""
+        out = []
+        for s in stickers:
+            if not isinstance(s, dict):
                 continue
-        path = s.get("file") or ""
-        if not path or not os.path.exists(path):
-            continue
+            sid = s.get("id")
+            if not sid:
+                continue
+            meta = tags.get(sid) or {}
+            s_scene = meta.get("scene") or ""
+            if use_scene and use_scene not in s_scene:
+                continue
+            if query:
+                hay = " ".join([str(s.get("name") or ""), s_scene,
+                                str(meta.get("text") or "")])
+                if query.lower() not in hay.lower():
+                    continue
+            path = s.get("file") or ""
+            if not path or not os.path.exists(path):
+                continue
 
-        hits = int(s.get("hits") or 0)
-        weight = (hits + 1) ** ALPHA
+            hits = int(s.get("hits") or 0)
+            weight = (hits + 1) ** ALPHA
 
-        # 刚发过的降权：避免连着两条同一张
-        last = extras.get(sid, {}).get("lastPick") or 0
-        if now - last < RECENT_WINDOW_S:
-            weight *= RECENT_PENALTY
+            # 刚发过的降权：避免连着两条同一张
+            last = extras.get(sid, {}).get("lastPick") or 0
+            if now - last < RECENT_WINDOW_S:
+                weight *= RECENT_PENALTY
 
-        # 被标为不适合转发的直接排除
-        if extras.get(sid, {}).get("safe") is False:
-            continue
+            # 被标为不适合转发的直接排除
+            if extras.get(sid, {}).get("safe") is False:
+                continue
 
-        pool.append((sid, s.get("name") or "", path, s_scene, weight))
+            out.append((sid, s.get("name") or "", path, s_scene, weight))
+        return out
 
+    scene_note = ""
+    pool = _build(scene)
+    if not pool and scene:
+        # 场景名没对上（人设让她传自然语言，而这里只认分类名）→ 退回全库挑
+        pool = _build("")
+        if pool:
+            known = sorted({(tags.get(s.get("id")) or {}).get("scene") or ""
+                            for s in stickers} - {""})
+            scene_note = ("（scene=%r 没对上任何分类，这次从全库挑的。"
+                          "可用的场景名有：%s；下次想精确就从中挑一个，"
+                          "拿不准就直接不传 scene。）"
+                          % (scene, "、".join(known[:12])))
     if not pool:
         return ("这个条件下一张都没有。scene=%r query=%r —— 换个说法，"
                 "或者用 qq_random_sticker 直接随机。" % (scene, query))
@@ -288,9 +304,9 @@ def pick(args):
         out.append("- id=%s  名字=%s  场景=%s" % (sid, name, tag))
     body = chr(10).join(out)
     log("pick scene=%r query=%r -> %s" % (scene, query, [p[0] for p in picked]))
-    return ("挑到 %d 张（按热度加权，已避开刚发过的）：%s%s"
+    return ("挑到 %d 张（按热度加权，已避开刚发过的）：%s%s%s"
             "选一张，用 qq_send_sticker(query=那个 id) 发出去。"
-            % (len(picked), chr(10), body + chr(10)))
+            % (len(picked), chr(10), body + chr(10), scene_note))
 
 
 # ── 入库 ───────────────────────────────────────────────────────────────
