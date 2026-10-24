@@ -135,12 +135,28 @@ CASUAL_HINT_WIRE = """            // 主动接话轮：这条不是你被叫到�
                 final = CASUAL_ENGAGE_HINT + final;
             }"""
 
+STICKER_NUDGE_CONST = """
+// Local patch: 表情提醒。把她"要不要配张表情"的念头每轮递到眼前——
+// 模型不会自发去调工具掷骰，光在人设里写一句等于没写。
+const STICKER_NUDGE = '（顺手想一下：这条要不要配张表情？三成左右该配一张。'
+    + '拿不准就配——qq_random_sticker() 一次调用就能发出去。）';
+"""
+
+STICKER_NUDGE_WIRE = """        // Local patch: 按概率附一句表情提醒（她自己决定用不用）
+        const nudgeRate = Number(this.ctx.config.stickerNudgeRate ?? 0);
+        if (nudgeRate > 0 && Math.random() < nudgeRate) {
+            final = final + String.fromCharCode(10) + STICKER_NUDGE;
+        }"""
+
 # ---------------------------------------------------------------- 4) index.js
 SCHEMA_KEYS = """    casualEngageRate: z.number().min(0).max(1).default(0)
         .description('主动接话概率：未 @ 她的群消息中按此概率被接住并回一句。只算当前这一条，'
             + '不写入激活窗口（接完就结束，下次仍需 @）；0 = 关闭'),
     casualEngageCooldownMs: z.number().default(60000)
         .description('同一群两次主动接话的最小间隔（毫秒）'),
+    stickerNudgeRate: z.number().min(0).max(1).default(0)
+        .description('表情提醒出现概率：每轮在消息尾部附一句极短的「要不要配张表情」，'
+            + '由她自己决定用不用；0 = 关闭'),
     casualEngageMaxPerHour: z.number().min(1).default(3)
         .description('主动接话每小时上限：把一小时切成这么多时间格，每格最多接一次'),
 """
@@ -148,6 +164,7 @@ SCHEMA_KEYS = """    casualEngageRate: z.number().min(0).max(1).default(0)
 GATE_KEYS = """        casualEngageRate: config.casualEngageRate,
         casualEngageCooldownMs: config.casualEngageCooldownMs,
         casualEngageMaxPerHour: config.casualEngageMaxPerHour,
+        stickerNudgeRate: config.stickerNudgeRate,
 """
 
 
@@ -199,7 +216,7 @@ def patch_inbound(apply_):
         return "跳过（找不到插入点）"
     if not apply_:
         return "未打"
-    s = s.replace(imp, imp + chr(10) + chr(10) + CASUAL_CONST, 1)
+    s = s.replace(imp, imp + chr(10) + chr(10) + CASUAL_CONST + chr(10) + STICKER_NUDGE_CONST, 1)
     s = s.replace(old_gate, CASUAL_GATE, 1)
     # 概率门要用到两个 Map，必须声明成类字段（否则 this.casualQuota 是 undefined）
     field_anchor = "    groupActiveUsers = new Map();"
@@ -212,6 +229,10 @@ def patch_inbound(apply_):
             final = buildGroupMessagePrefix(nickname, userId, mentioned) + final;"""
     if hook in s:
         s = s.replace(hook, hook + chr(10) + CASUAL_HINT_WIRE, 1)
+    # 表情提醒：插在 dispatch 之前，群聊私聊都生效
+    disp = "        await this.ctx.dispatchFollowup(chatId, final, role, nickname);"
+    if disp in s and 'stickerNudgeRate' not in s:
+        s = s.replace(disp, STICKER_NUDGE_WIRE + chr(10) + disp, 1)
     wr(p, s)
     return "已打"
 
