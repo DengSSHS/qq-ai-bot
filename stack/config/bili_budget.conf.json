@@ -1,0 +1,7 @@
+{
+ "_note": "B 站浏览的 token 预算。**默认关闭**：enabled=false 表示不限制。",
+ "_how": "填 enabled=true 并按自己的用量设 daily_tokens；超出后 B 站读工具会拒绝，直到第二天。",
+ "enabled": false,
+ "daily_tokens": 150000,
+ "token_per_char": 0.5
+}

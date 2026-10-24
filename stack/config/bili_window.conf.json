@@ -1,0 +1,11 @@
+{
+ "_note": "低谷时段：这段时间她可以自己刷 B 站。跨零点写成 [开始, 结束]。",
+ "allowed_windows": [["23:30", "08:00"]],
+ "daily_auto_opens": 3,
+ "auto_minutes": 25,
+ "manual_per_day": 2,
+ "manual_max_minutes": 60,
+ "_ramp_note": "累积随机：低谷期每多待一小时，叫醒她的概率抬高一档，封顶 ramp_cap。同一小时内只掷一次。",
+ "ramp_per_hour": 0.25,
+ "ramp_cap": 0.9
+}

@@ -1,0 +1,285 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""B 站能力的统一入口（她只连这一个 MCP）。
+
+为什么要有这层代理：
+    一开始我把 Tulpa 的 MCP 直接给了她，然后用"开关 MCP"来做时间窗。
+    实测发现行不通：**dsh 的 MCP 连接是启动时建立的**，关掉再开它不会重连，
+    于是工具名还在、调用全失败（她当时说"手里好像没有能读视频的工具"）。
+
+    所以改成：Tulpa 的 MCP 一直开着，时间窗的判断放在这层代理里。
+    代理自己常驻（stdio，dsh 启动就连上，永不掉线）。
+
+分工：
+    Tulpa        读（搜索/推荐/字幕/抽帧/评论），只读，wbi 签名与 SSRF 防护都由它做
+    本代理       时间窗 + 配额 + 转发 + 写（评论区 @ 主人）
+
+时间窗规则（bili_window.conf.json 可改）：
+    低谷时段（默认 23:30-08:00）：可以自己刷，每天自动额度 3 次
+    高峰时段：读工具统一拒绝，返回 ok:false「现在不给我玩」
+    主人在对话里说「给你玩 N 分钟」→ 她调 bili_open(N) 开窗口，到点自动关
+"""
+import io
+import json
+import os
+import sys
+import time
+import urllib.request
+
+BASE = "/opt/dsh"
+CONF = os.path.join(BASE, "bili_share.conf.json")
+LOG = os.path.join(BASE, "memory/bili-share.jsonl")
+TULPA_URL = "http://127.0.0.1:18777/mcp"
+TULPA_CONN = "/tmp/conn.json"
+
+READ_TOOLS = {
+    "search_videos": "按关键词搜 B 站视频，返回标题/UP主/时长/BV号",
+    "get_recommended_videos": "登录账号的推荐流（就像刷首页）",
+    "get_video_info": "单个视频的详情（简介、分P、统计）",
+    "read_video": "读视频内容：异步任务，字幕优先（带时间戳），同时抽帧",
+    "get_video_job": "查 read_video 的任务状态，succeeded 后取结果",
+    "get_video_comments": "读评论区",
+    "get_video_frames": "取已抽好的画面帧",
+    "get_bilibili_status": "B 站登录状态",
+    "cancel_video_job": "取消一个读视频任务",
+}
+
+
+def log(msg):
+    try:
+        with io.open(LOG, "a", encoding="utf-8") as f:
+            f.write(msg + chr(10))
+    except Exception:
+        pass
+
+
+def conf():
+    try:
+        return json.load(io.open(CONF, encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+# ---------------------------------------------------------------- 转发给 Tulpa
+def _tulpa_token():
+    try:
+        return json.load(io.open(TULPA_CONN, encoding="utf-8"))["token"]
+    except Exception:
+        return ""
+
+
+def forward(name, args):
+    """把工具调用转给 Tulpa 的 MCP。无状态：每次带 initialize 也没关系。"""
+    tok = _tulpa_token()
+    if not tok:
+        return {"ok": False, "error": {"code": "no_token", "message": "代理没有 Tulpa 的访问凭据"}}
+
+    def post(payload):
+        req = urllib.request.Request(
+            TULPA_URL, data=json.dumps(payload).encode(), method="POST",
+            headers={"Authorization": "Bearer " + tok,
+                     "Content-Type": "application/json",
+                     "Accept": "application/json, text/event-stream"})
+        with urllib.request.urlopen(req, timeout=90) as r:
+            return json.loads(r.read().decode("utf-8", "replace"))
+
+    try:
+        post({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2024-11-05", "capabilities": {},
+            "clientInfo": {"name": "bili-hub", "version": "1"}}})
+        d = post({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                  "params": {"name": name, "arguments": args or {}}})
+    except Exception as e:
+        return {"ok": False, "error": {"code": "tulpa_unreachable",
+                                       "message": "B 站服务没连上：%s" % str(e)[:80]}}
+
+    content = ((d.get("result") or {}).get("content") or [])
+    text = content[0].get("text") if content else ""
+    try:
+        return json.loads(text)
+    except Exception:
+        return {"ok": False, "error": {"code": "bad_response", "message": str(text)[:120]}}
+
+
+# ---------------------------------------------------------------- 时间窗
+def gate():
+    """读之前先过这一关。返回 (能不能, 原因)。"""
+    try:
+        sys.path.insert(0, BASE)
+        import bili_window
+        ok, why, left = bili_window.allowed()
+        return ok, why, left
+    except Exception as e:
+        return True, "时间窗模块不可用（%s），放行" % str(e)[:40], 0
+
+
+# ---------------------------------------------------------------- 写：评论区 @
+def limits():
+    now = time.time()
+    recs = []
+    try:
+        for line in io.open(LOG, encoding="utf-8"):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                r = json.loads(line)
+            except Exception:
+                continue
+            if r.get("ok") and r.get("bvid") and r.get("ts", 0) > now - 7 * 86400:
+                recs.append(r)
+    except Exception:
+        pass
+    today0 = time.mktime(time.localtime()[:3] + (0, 0, 0, 0, 0, -1))
+    sent = [r for r in recs if r.get("ts", 0) >= today0]
+    last = max([r.get("ts", 0) for r in recs], default=0)
+    return {"daily_max": 3, "sent_today": len(sent), "left_today": max(0, 3 - len(sent)),
+            "next_ok_in_s": max(0, int(last + 1200 - now)) if last else 0}
+
+
+def share(args):
+    bvid = (args.get("bvid") or "").strip()
+    note = (args.get("note") or "").strip()[:40]
+    if not bvid.upper().startswith("BV"):
+        return {"ok": False, "error": {"code": "bad_bvid", "message": "bvid 要以 BV 开头"}}
+    c = conf()
+    mid, name = c.get("owner_mid"), (c.get("owner_name") or "").strip()
+    if not mid or not name:
+        return {"ok": False, "error": {"code": "no_owner", "message": "没配置主人 B站 mid"}}
+
+    lim = limits()
+    if lim["left_today"] <= 0:
+        return {"ok": False, "error": {"code": "daily_limit", "message": "今天分享够 3 条了"}, "limits": lim}
+    if lim["next_ok_in_s"] > 0:
+        return {"ok": False, "error": {"code": "too_soon",
+                                       "message": "刚分享过，%d 分钟后再来" % (lim["next_ok_in_s"] // 60)},
+                "limits": lim}
+    try:
+        for line in io.open(LOG, encoding="utf-8"):
+            r = json.loads(line) if line.strip() else {}
+            if r.get("ok") and (r.get("bvid") or "").upper() == bvid.upper():
+                return {"ok": False, "error": {"code": "duplicate",
+                                               "message": "这个视频已经分享过了"}}
+    except Exception:
+        pass
+
+    sys.path.insert(0, BASE)
+    import bili_at
+    res = bili_at.post_comment(bvid, note or "这个我觉得挺有意思", at_mid=mid, at_name=name)
+    log(json.dumps({"ts": int(time.time()), "bvid": bvid, "note": note,
+                    "ok": bool(res.get("ok")), "rpid": res.get("rpid")}, ensure_ascii=False))
+    if not res.get("ok"):
+        return {"ok": False, "error": res.get("error") or {"code": "unknown"},
+                "note": "硬拒绝，别重试"}
+    return {"ok": True, "bvid": bvid, "rpid": res.get("rpid"), "shared_with": name,
+            "note": "已在他评论区 @ 他，通知会到。审核期内游客可能看不到，不影响通知。",
+            "limits": limits()}
+
+
+# ---------------------------------------------------------------- 工具表
+TOOLS = [{
+    "name": "bili_budget",
+    "description": "看今天的 B 站浏览 token 额度还剩多少（会计入每次搜索/读视频的返回体量）。",
+    "inputSchema": {"type": "object", "properties": {}},
+}, {
+    "name": "bili_now",
+    "description": "看现在能不能刷 B 站、还剩多久。刷之前先查它——现在是低谷还是高峰。",
+    "inputSchema": {"type": "object", "properties": {}},
+}, {
+    "name": "bili_open",
+    "description": ("主人说「给你玩」「去刷会儿」时调它，开一个限时浏览窗口。"
+                    "minutes 是分钟数（他说了就用他的，没说填 25）。"
+                    "每天最多 2 次、单次最长 60 分钟。只在主人让你玩时调。"),
+    "inputSchema": {"type": "object",
+                    "properties": {"minutes": {"type": "integer", "description": "多少分钟"}}},
+}, {
+    "name": "bili_share_to_owner",
+    "description": ("在视频评论区 @ 主人，把视频递给他（他收到 B 站通知）。"
+                    "bvid 是视频号，note 是 20 字内的理由。一天最多 3 条，"
+                    "同一个视频只分享一次。"),
+    "inputSchema": {"type": "object",
+                    "properties": {"bvid": {"type": "string"},
+                                   "note": {"type": "string", "description": "20 字内"}},
+                    "required": ["bvid"]},
+}]
+for _n, _d in READ_TOOLS.items():
+    TOOLS.append({"name": _n, "description": _d + "（受浏览时间窗限制）",
+                  "inputSchema": {"type": "object", "properties": {}, "additionalProperties": True}})
+
+
+def reply(obj):
+    sys.stdout.write(json.dumps(obj, ensure_ascii=False) + chr(10))
+    sys.stdout.flush()
+
+
+def call_tool(name, args):
+    if name == "bili_now":
+        ok, why, left = gate()
+        return {"ok": True, "can_browse": ok, "reason": why, "left_minutes": left // 60}
+    if name == "bili_open":
+        import bili_window
+        mins = int(args.get("minutes") or 25)
+        ok, msg = bili_window.open_window(mins, by="对话授权", manual=True)
+        return {"ok": ok, "message": msg,
+                "note": "" if ok else "被限频拒绝了，别重试，跟主人说一声"}
+    if name == "bili_share_to_owner":
+        return share(args)
+    if name == "bili_budget":
+        import bili_budget
+        bili_budget.ensure_conf()
+        return {"ok": True, **bili_budget.status()}
+
+    if name in READ_TOOLS:
+        ok, why, left = gate()
+        if not ok:
+            return {"ok": False, "error": {"code": "window_closed", "message": why},
+                    "note": "现在不是能刷的时候。别反复试，跟主人说一声就好。"}
+        import bili_budget
+        bok, bwhy, _ = bili_budget.check()
+        if not bok:
+            return {"ok": False, "error": {"code": "budget_exhausted", "message": bwhy},
+                    "note": "额度没了，别重试。可以跟主人说一声。",
+                    "budget": bili_budget.status()}
+        res = forward(name, args)
+        try:
+            if isinstance(res, dict) and res.get("ok"):
+                bili_budget.record(bili_budget.estimate(res))
+        except Exception:
+            pass
+        return res
+    return {"ok": False, "error": {"code": "unknown_tool", "message": name}}
+
+
+def main():
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            req = json.loads(line)
+        except Exception:
+            continue
+        mid, method = req.get("id"), req.get("method")
+        if method == "initialize":
+            reply({"jsonrpc": "2.0", "id": mid, "result": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {"tools": {"listChanged": False}},
+                "serverInfo": {"name": "bili-hub", "version": "1.0.0"}}})
+        elif method == "tools/list":
+            reply({"jsonrpc": "2.0", "id": mid, "result": {"tools": TOOLS}})
+        elif method == "tools/call":
+            p = req.get("params") or {}
+            try:
+                out = call_tool(p.get("name"), p.get("arguments") or {})
+            except Exception as e:
+                out = {"ok": False, "error": {"code": "crash", "message": str(e)[:140]}}
+            reply({"jsonrpc": "2.0", "id": mid, "result": {
+                "content": [{"type": "text", "text": json.dumps(out, ensure_ascii=False)}],
+                "isError": False}})
+        elif mid is not None:
+            reply({"jsonrpc": "2.0", "id": mid,
+                   "error": {"code": -32601, "message": "unsupported: %s" % method}})
+
+
+if __name__ == "__main__":
+    main()
