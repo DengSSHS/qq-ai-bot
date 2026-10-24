@@ -96,7 +96,12 @@ CASUAL_GATE = """        // 主动接话：每条未 @ 她的群消息都有一�
         // 所以既不会一小时刷十几次，也不会在开头几分钟把配额用光。
         let casualEngage = false;
         if (kind === 'group' && this.ctx.config.requireMention && !mentioned && !activationActive) {
-            const rate = Number(this.ctx.config.casualEngageRate ?? 0);
+            // 图片消息用单独的概率（读不到就回落到 casualEngageRate，行为不变）
+            const segs = Array.isArray(inbound.segments) ? inbound.segments : [];
+            const hasPic = segs.some((sg) => sg && (sg.type === 'image' || sg.type === 'mface'));
+            const textRate = Number(this.ctx.config.casualEngageRate ?? 0);
+            const picRate = Number(this.ctx.config.imageEngageRate ?? textRate);
+            const rate = hasPic ? picRate : textRate;
             const cooldown = Number(this.ctx.config.casualEngageCooldownMs ?? 0);
             const maxPerHour = Math.max(1, Number(this.ctx.config.casualEngageMaxPerHour ?? 3));
             const last = this.casualEngageAt?.get(chatId) ?? 0;
@@ -139,6 +144,9 @@ CASUAL_HINT_WIRE = """            // 主动接话轮：这条不是你被叫到�
 SCHEMA_KEYS = """    casualEngageRate: z.number().min(0).max(1).default(0)
         .description('主动接话概率：未 @ 她的群消息中按此概率被接住并回一句。只算当前这一条，'
             + '不写入激活窗口（接完就结束，下次仍需 @）；0 = 关闭'),
+    imageEngageRate: z.number().min(0).max(1).default(0)
+        .description('图片消息的主动接话概率（覆盖 casualEngageRate）：'
+            + '群里别人发的图按此概率被接住，看一眼再接话；0 = 用 casualEngageRate'),
     casualEngageCooldownMs: z.number().default(60000)
         .description('同一群两次主动接话的最小间隔（毫秒）'),
     casualEngageMaxPerHour: z.number().min(1).default(3)

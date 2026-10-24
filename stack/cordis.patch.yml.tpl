@@ -141,6 +141,13 @@
     actionRatePerMinute: 20
     actionRatePerDay: 400
 
+    # --- 主动接话（未 @ 她的群消息里，挑一小部分「接住」）---
+    # 接住只算这一条，不进激活窗口：说完就结束，下次还得 @
+    imageEngageRate: 0.3          # 图片消息单独的概率：群里别人发的图三成会看一眼再接话
+    casualEngageRate: 0.2         # 文字消息按这个概率被接住（每小时最多 3 次）
+    casualEngageCooldownMs: 60000 # 两次接话的最小间隔
+    casualEngageMaxPerHour: 3     # 把一小时切成 3 格，每格最多接一次
+
     # --- 媒体 ---
     inboundImageMaxPx: 1024
     outboundImageMaxBytes: 8388608
