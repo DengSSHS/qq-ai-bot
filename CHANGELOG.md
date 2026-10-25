@@ -2,6 +2,47 @@
 
 本项目按「改了什么 + 为什么」记录，不按版本号堆功能。所有日期为实际改动日期。
 
+## v0.9.3 — 2026-10-26 · 发送审计（第 2 条的第一步：让"假成功"可见）
+
+不做大改，只做一件事：**把"到底发没发"变成可查的事实**。
+理由——dry-run 假成功、"告警已告知"其实没发、限流拒发但调用方以为成功，
+这三个都不会抛错，只会在事后变成"我怎么记得说过了"。
+
+### 做法
+
+`send-audit.js`：包一层 `connection.call`（所有出站最终都走它），每次写操作记一行：
+
+```json
+{"ts":..., "action":"send_msg", "target":"private:1709393282", "ok":true, "message_id":1035084588, "ms":130}
+{"ts":..., "action":"send_msg", "target":"private:1709392682", "ok":false, "intercepted":true, "ms":0}
+{"ts":..., "action":"set_input_status", "ok":false, "error":"OneBot transport stopped", "ms":2}
+```
+
+判定：`send_*` 拿不到真实 `message_id`（>0）→ 记 `fake` 并打 warn；
+`message_id = -1` → 是注入 dry-run 的拦截标记，记 `intercepted`（已知行为，不算故障）；
+抛异常 → 记 `fail`。落盘 `media/onebot/send_audit.jsonl`。
+
+### 踩到的坑（记下来）
+
+第一版只包了 `connection.call`，结果 dry-run 的拦截**一行都没记**——
+因为拦截在 guard 里直接 `return` 了，压根不经过 connection.call。
+所以额外导出 `noteIntercept()`，在 `inject.intercept()` 里单独记一笔。
+
+### 实测
+
+```
+跑测试前：10 行（ok 8 / fail 2 —— 两条 fail 是重启时 set_input_status「transport stopped」）
+跑 dry 测试后：14 行（+4 intercepted）
+真实聊天：send_msg ok + 真实 message_id（1 秒级延迟）
+```
+
+### 补丁体系顺手修好
+
+- 补丁 9（引用/表情/拍一拍）原来试图插 v0.9.0 的 poke 钩子，事件层上线后那段代码已不存在 →
+  现在检测到 `EVENT_ADAPTER` 就自动跳过 bridge 那两处，不再误报"锚点没找到"
+- 新增补丁 11：装 `events.js` + 接 bridge 入口（幂等，带 `EVENT_ADAPTER` 标记）
+- 当前 12 项补丁全部「已打」，fork 快照已刷新到 `fork-20261026`（30 个文件）
+
 ## v0.9.2 — 2026-10-26 · 统一备份（六条里的第 6 条，最小可用版）
 
 散着 113 处备份痕迹，却没有一个清单能回答"迁机器该带走什么"。这一版给答案。

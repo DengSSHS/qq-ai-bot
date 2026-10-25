@@ -17,6 +17,7 @@
   7. inbound.js + prompt.js 三层记忆接线：每轮检索大记忆库 + 注入临时层摘要
   8. bridge.js  气泡上限 3→6（长回复保持分散，不再合并成长条）
   9. chat/inbound/bridge/tools/prompt  引用回复 + 表情回应 + 拍一拍（入站+出站）
+ 10. index.js + inject.js  发送审计（所有出站写记一行，假成功可见）
 
 用法（在服务器上，以 root）：
     python3 apply_local_patches.py            # 打补丁
@@ -24,6 +25,7 @@
 """
 import io
 import os
+import shutil
 import subprocess
 import sys
 
@@ -686,8 +688,9 @@ def patch_reply_poke_emoji(apply_):
 
     # 五处功能标记都在 = 已经打过了。线上文件可能被手工微调过，
     # 逐字比对会误判成「未打」从而重复插入（踩过一次），所以先用标记兜一层。
+    have_bridge = ("POKE_IN" in rd(br)) or ("EVENT_ADAPTER" in rd(br))
     if ("MSG_ID_ATTR" in rd(ch) and "inbound.messageId" in rd(ib)
-            and "POKE_IN" in rd(br) and "QQ_REPLY_POKE_EMOJI" in rd(tl)
+            and have_bridge and "QQ_REPLY_POKE_EMOJI" in rd(tl)
             and "qq_emoji_like" in rd(pr)):
         return "已打"
 
@@ -696,6 +699,7 @@ def patch_reply_poke_emoji(apply_):
         "prompt.js 平台提示": "qq_emoji_like",
         "bridge 拍一拍": "handlePokeNotice(event) {",
         "bridge notice 入口": "POKE_IN",
+        "bridge 拍一拍": "POKE_IN",
         "tools.js 三个工具": "QQ_REPLY_POKE_EMOJI",
     }
     todo = []
@@ -703,6 +707,9 @@ def patch_reply_poke_emoji(apply_):
     def sub(text, old, new, tag):
         mk = MARK9.get(tag)
         if new in text or (mk is not None and mk in text):
+            return text
+        # 事件适配层已经接管入站入口时，不再插旧的 poke 钩子
+        if tag in ("bridge notice 入口", "bridge 拍一拍") and "EVENT_ADAPTER" in text:
             return text
         if old not in text:
             todo.append(tag + "（锚点没找到）")
@@ -958,6 +965,139 @@ def patch_reply_poke_emoji(apply_):
     return "已打"
 
 
+def patch_send_audit(apply_):
+    """统一发送审计：所有出站写记一行，只有真实 message_id 才算发出去了。
+
+    为什么先做这个再谈"统一 gateway"：
+      dry-run 假成功、"告警已告知"其实没发、限流拒发但调用方以为成功——
+      这些都不会抛错，只会让人以为发出去了。先把"到底发没发"变成可查的事实，
+      再去收口发送路径，风险小一半。
+
+    做法：包一层 connection.call（所有出站最终都走它），并在 dry-run 拦截处
+    单独记一笔（那条路不经过 connection.call，否则审计里看不出"其实没发"）。
+    """
+    src = os.path.join(BASE, "send-audit.js")
+    dst = os.path.join(LIB, "send-audit.js")
+    idx = os.path.join(LIB, "index.js")
+    inj = os.path.join(LIB, "inject.js")
+
+    if not os.path.isfile(src):
+        return "跳过（没有 /opt/dsh/send-audit.js）"
+
+    applied = 0
+    if not os.path.isfile(dst):
+        if not apply_:
+            return "未打"
+        shutil.copy2(src, dst)
+        applied += 1
+
+    s1 = rd(idx)
+    if "installSendAudit" not in s1:
+        if not apply_:
+            return "未打"
+        s1 = s1.replace("let OneBotConnection;", "let OneBotConnection;" + chr(10) + "let installSendAudit;", 1)
+        s1 = s1.replace(
+            "    ({ OneBotConnection } = await import('./connection.js'));",
+            "    ({ OneBotConnection } = await import('./connection.js'));"
+            + chr(10) + "    // local patch (SEND_AUDIT): 统一发送审计（真实 message_id 才算发出）"
+            + chr(10) + "    ({ installSendAudit } = await import('./send-audit.js'));", 1)
+        anchor = "    const media = new MediaStore(mediaDir,"
+        i0 = s1.find(anchor)
+        if i0 < 0:
+            return "跳过（index.js 找不到 MediaStore 锚点）"
+        s1 = s1[:i0] + ("    // local patch (SEND_AUDIT): 装在最靠近连接的地方"
+                        + chr(10) + "    installSendAudit(connection, { dir: mediaDir, log });" + chr(10)) + s1[i0:]
+        wr(idx, s1)
+        applied += 1
+
+    s2 = rd(inj)
+    if "noteIntercept" not in s2:
+        if not apply_:
+            return "未打"
+        s2 = s2.replace("import { newTraceId } from './trace.js';",
+                        "import { newTraceId } from './trace.js';"
+                        + chr(10) + "import { noteIntercept } from './send-audit.js';", 1)
+        a2 = "    intercept(round, action, params) {" + chr(10)
+        if a2 in s2:
+            s2 = s2.replace(a2, a2 + ("        // local patch (SEND_AUDIT): 拦截也要记账"
+                                      + chr(10) + "        try { noteIntercept(action, params); }"
+                                      + chr(10) + "        catch (e) { void e; }" + chr(10)), 1)
+        wr(inj, s2)
+        applied += 1
+
+    return "已打" if applied or (os.path.isfile(dst) and "installSendAudit" in rd(idx) and "noteIntercept" in rd(inj)) else "未打"
+
+
+def patch_event_adapter(apply_):
+    """统一事件适配层：所有 OneBot 事件先归一化，再由 ROUTES 决定喂不喂模型。
+
+    原来只有 message 走管线，notice（拍一拍/撤回/进群/贴表情）在 normalizeOneBot11
+    就返回 null 被丢掉了。加一种感知就要改一遍入站流程——引用、拍一拍、撤回都这么漏的。
+    """
+    br = os.path.join(LIB, "bridge.js")
+    ev_src = os.path.join(BASE, "events.js")
+    ev_dst = os.path.join(LIB, "events.js")
+
+    if "EVENT_ADAPTER" in rd(br) and os.path.isfile(ev_dst):
+        return "已打"
+    if not os.path.isfile(ev_src):
+        return "跳过（没有 /opt/dsh/events.js）"
+    if not apply_:
+        return "未打"
+
+    if not os.path.isfile(ev_dst):
+        shutil.copy2(ev_src, ev_dst)
+
+    sb = rd(br)
+    if "EVENT_ADAPTER" not in sb:
+        sb = sb.replace("import { buildPromptParts } from './prompt.js';",
+                        "import { buildPromptParts } from './prompt.js';"
+                        + chr(10) + "// local patch (EVENT_ADAPTER): 统一事件适配层"
+                        + chr(10) + "import { describeEvent, toInboundEvent, countEvent } from './events.js';", 1)
+
+        # 旧形态 A：上游原版
+        old_a = ("                const inbound = normalizeOneBot11(event);"
+                 + chr(10) + "                if (inbound === null) {"
+                 + chr(10) + "                    this.deps.log('debug', '非聊天消息事件，不处理（post_type=' + String(event.post_type) + '）');"
+                 + chr(10) + "                    scope?.emit('normalize', { ok: false, reason: TRACE_REASONS.inboundNotChat });"
+                 + chr(10) + "                    return;"
+                 + chr(10) + "                }"
+                 + chr(10) + "                await this.processInbound(inbound);")
+        # 旧形态 B：v0.9.0 的 poke 钩子
+        old_b = ("                // local patch (POKE_IN): 拍一拍是 notice 事件，原逻辑在这里被丢弃"
+                 + chr(10) + "                if (event && event.post_type === 'notice' && await this.handlePokeNotice(event)) {"
+                 + chr(10) + "                    return;"
+                 + chr(10) + "                }"
+                 + chr(10) + old_a)
+
+        new_block = ("                // local patch (EVENT_ADAPTER): 所有事件先归一化，再由路由表决定喂不喂模型"
+                     + chr(10) + "                const desc = describeEvent(event);"
+                     + chr(10) + "                countEvent(desc);"
+                     + chr(10) + "                const synthetic = toInboundEvent(event, desc);"
+                     + chr(10) + "                if (synthetic === null) {"
+                     + chr(10) + "                    this.deps.log(desc.kind === 'other' ? 'debug' : 'info',"
+                     + chr(10) + "                        '事件只记录不下发：' + desc.key);"
+                     + chr(10) + "                    scope?.emit('normalize', { ok: true, reason: 'event-recorded:' + desc.key });"
+                     + chr(10) + "                    return;"
+                     + chr(10) + "                }"
+                     + chr(10) + "                const inbound = normalizeOneBot11(synthetic);"
+                     + chr(10) + "                if (inbound === null) {"
+                     + chr(10) + "                    this.deps.log('debug', '合成事件无法归一化：' + desc.key);"
+                     + chr(10) + "                    scope?.emit('normalize', { ok: false, reason: TRACE_REASONS.inboundNotChat });"
+                     + chr(10) + "                    return;"
+                     + chr(10) + "                }"
+                     + chr(10) + "                await this.processInbound(inbound);")
+
+        if old_b in sb:
+            sb = sb.replace(old_b, new_block, 1)
+        elif old_a in sb:
+            sb = sb.replace(old_a, new_block, 1)
+        else:
+            return "跳过（bridge 入口锚点没找到）"
+        wr(br, sb)
+    return "已打"
+
+
 PATCHES = [
     ("prompt.js  长期记忆注入", patch_prompt),
     ("bridge.js  时间后缀 + 静音系统播报", patch_bridge),
@@ -970,6 +1110,8 @@ PATCHES = [
     ("mem_layers 三层记忆接线（每轮检索 + 摘要注入）", patch_mem_layers),
     ("bridge.js 气泡默认不限（0=不限，接口保留）", patch_bubble_spread),
     ("引用回复 / 表情回应 / 拍一拍（入站+出站）", patch_reply_poke_emoji),
+    ("发送审计（真实 message_id 才算发出）", patch_send_audit),
+    ("事件适配层 events.js（notice 不再被丢）", patch_event_adapter),
 ]
 
 
