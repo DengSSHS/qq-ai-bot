@@ -656,7 +656,7 @@ PATCHES = [
     ("inject+bridge 注入按条 dry_run（测试不打扰主人）",
      patch_inject_per_event_dry),
     ("mem_layers 三层记忆接线（每轮检索 + 摘要注入）", patch_mem_layers),
-    ("bridge.js 气泡上限 3→6（长回复保持分散）", patch_bubble_spread),
+    ("bridge.js 气泡上限读 limits.json（私聊4/群2）", patch_bubble_spread),
 ]
 
 
