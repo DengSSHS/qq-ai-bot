@@ -2,6 +2,22 @@
 
 本项目按「改了什么 + 为什么」记录，不按版本号堆功能。所有日期为实际改动日期。
 
+## v0.7.20 — 2026-10-25 · 自动更新改成默认关闭 + 两道保护
+
+- **本机已关**：`auto_update 关`、定时器 `disabled`，手动跑脚本会打印
+  「跳过：switches.py 里 auto_update = 关」
+- **装机默认关闭**：`install.sh` 不再 enable 它，只提示怎么开
+  （开发者机器该自己控制升级时机，别人的机器也不该在不知情下变样）
+- **两道保护**：最近 15 分钟有对话活动 → 跳过；`memory-distill`/`sticker-settle`
+  正在跑 → 跳过。实测 touch 会话文件后正确跳过
+
+关于“不影响对话与记忆”的边界：`update.sh` 只写 `cordis.patch.yml`（只补缺失键）、
+`routines.json`（只加新 routine）、`node_modules`（重装 fork/补丁），
+grep 确认全脚本不涉及 `sessions/` `memory/` `workspace/` `persona/` `media/`。
+重启不丢会话（会话落盘，dsh 起来自己 attached）。
+
+诚实提醒：不打断已保证，但升级本身仍会重启一次，那一两秒内正好发的消息会失败（概率极低）。
+
 ## v0.7.19 — 2026-10-25 · 自动更新：每天凌晨 4 点自己检查
 
 新增 `auto-update.timer`（04:00 ±10min）：git fetch 比对 → 有新版就 `git pull` +

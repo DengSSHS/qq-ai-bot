@@ -50,6 +50,22 @@ if [ "$MODE" != "check" ]; then
   fi
 fi
 
+# ── 保护一：对话进行中不升级 ───────────────────────────────────────────
+# 升级要重启 dsh，正在进行的回合会被打断。最近 15 分钟有人说过话就跳过。
+ACTIVE="$(find "$BASE/sessions" -name 'session.v4.jsonl.zstd' -newermt '-15 minutes' 2>/dev/null | head -1)"
+if [ -n "$ACTIVE" ]; then
+  log "跳过：15 分钟内有对话活动（$(basename "$(dirname "$ACTIVE")")），不打断"
+  exit 0
+fi
+
+# ── 保护二：别和后台任务撞 ─────────────────────────────────────────────
+for u in memory-distill.service sticker-settle.service; do
+  if systemctl is-active --quiet "$u" 2>/dev/null; then
+    log "跳过：$u 正在运行（等它跑完再来）"
+    exit 0
+  fi
+done
+
 REPO="$(find_repo)"
 if [ -z "$REPO" ]; then
   log "跳过：找不到 git 仓库（tarball 部署的机器没有自更新能力，请用 update.sh 手动更新）"

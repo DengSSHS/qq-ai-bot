@@ -475,10 +475,15 @@ for t in qqguard.timer memory-distill.timer sticker-settle.timer \
 done
 ok "定时任务已装：掉线看护 / 记忆蒸馏 / 收图结算 / 日报 / 漂移检测 / 日记提醒"
 
-# 自动更新：每天凌晨 4 点检查仓库，有更新就升，坏了自动回滚。
-# 想关：python3 /opt/dsh/switches.py off auto_update
-systemctl enable --now auto-update.timer >>"$LOG" 2>&1 || warn "auto-update.timer 启动失败"
-ok "自动更新已开启（每天 04:00；关闭：switches.py off auto_update）"
+# 自动更新：**默认不开**。
+# 理由：升级会重启 dsh，正在进行的对话会被打断；开发者的机器本來就该手动控制升级时机。
+# 想要就手动开：python3 /opt/dsh/switches.py on auto_update
+#                （或 systemctl enable --now auto-update.timer）
+if systemctl is-enabled --quiet auto-update.timer 2>/dev/null; then
+  ok "自动更新已开启（之前开过，保持不动；关：switches.py off auto_update）"
+else
+  ok "自动更新未开启（默认；要开：switches.py on auto_update）"
+fi
 
 sleep 8
 systemctl is-active --quiet dsh-onebot && ok "dsh-onebot 运行中" || die "dsh-onebot 没起来：journalctl -u dsh-onebot -n 50"
