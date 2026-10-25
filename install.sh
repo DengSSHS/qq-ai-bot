@@ -187,6 +187,11 @@ mkdir -p "$DSH_HOME"/{media/onebot,memory,workspace,sessions,storages,profiles/w
 cp -f "$STACK"/*.py "$STACK"/*.sh "$STACK"/*.json "$DSH_HOME"/ 2>/dev/null
 rm -f "$DSH_HOME/profile-package.json"
 chmod +x "$DSH_HOME"/*.sh 2>/dev/null
+# 记下基线（哈希），以后 update.sh 靠它区分「没人动过」和「使用者自己改过」。
+# 不记的话，第一次更新就搞不清哪些文件被改过，只能保守地不更新。
+if [ -f "$STACK/sync_scripts.py" ]; then
+  "$PY" "$STACK/sync_scripts.py" --adopt >/dev/null 2>&1 || warn "基线记录失败（不影响使用，更新时会保守处理）"
+fi
 # 脚本里的占位符也要替换（checkall.py / audit.sh 里写死了 botQQ 和主人 QQ）
 for f in "$DSH_HOME"/*.py "$DSH_HOME"/*.sh; do
   [ -f "$f" ] || continue

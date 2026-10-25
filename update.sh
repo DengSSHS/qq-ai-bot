@@ -144,6 +144,18 @@ if not dry:
 PY
 [ "$DRY" = "1" ] || ok "日程已更新"
 
+# ── 3.5 脚本同步（三方比对，绝不覆盖别人改过的文件）─────────────
+say "3.5/6 脚本同步（保护本地改动）"
+if [ -f "$PWD/stack/sync_scripts.py" ]; then
+  if [ "$DRY" = "1" ]; then
+    REPO_DIR="$PWD" "$PY" "$PWD/stack/sync_scripts.py" --check || true
+  else
+    REPO_DIR="$PWD" "$PY" "$PWD/stack/sync_scripts.py" || warn "脚本同步有问题"
+  fi
+else
+  warn "没有 sync_scripts.py，跳过脚本同步"
+fi
+
 # ── 4. 插件：重装 fork + 重打补丁 ─────────────────────────────────────
 say "4/6 插件与本地补丁"
 if [ -x "$PWD/stack/vendor/install_fork.sh" ]; then
