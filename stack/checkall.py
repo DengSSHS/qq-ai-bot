@@ -567,6 +567,56 @@ try:
 except Exception as e:
     warn("上下文稳定性检查失败：%s" % e)
 
+# ---------------- 18. 调度器与出站队列 ----------------
+sec("18. 调度器 / 出站队列")
+try:
+    import json as _j2
+    import time as _t2
+    # 调度器定时器
+    rc, out, _e = sh("systemctl is-active scheduler.timer")
+    (ok if out == "active" else bad)("scheduler.timer: %s" % out)
+    rc, out, _e = sh("systemctl is-active proactive.timer")
+    if out == "active":
+        warn("旧的 proactive.timer 还在跑（会和调度器重复触发）")
+    # 待办意图
+    pend = 0
+    try:
+        for line in io.open("/opt/dsh/memory/intents.jsonl", encoding="utf-8"):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                if _j2.loads(line).get("state") == "new":
+                    pend += 1
+            except Exception:
+                pass
+    except Exception:
+        pass
+    (warn if pend > 5 else ok)("待办意图 %d 条" % pend)
+    # outbox 结果
+    okn = badn = 0
+    since = _t2.time() - 86400
+    try:
+        for line in io.open("/opt/dsh/media/onebot/qq-outbox.result.jsonl", encoding="utf-8"):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = _j2.loads(line)
+            except Exception:
+                continue
+            if float(row.get("ts") or 0) < since:
+                continue
+            if row.get("ok"):
+                okn += 1
+            else:
+                badn += 1
+    except Exception:
+        pass
+    (ok if badn == 0 else warn)("outbox 24h：成功 %d 条，失败 %d 条" % (okn, badn))
+except Exception as e:
+    warn("调度器检查失败：%s" % e)
+
 # ---------------- 总结 ----------------
 print()
 print("=" * 62)

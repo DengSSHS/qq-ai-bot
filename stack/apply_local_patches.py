@@ -20,6 +20,7 @@
  10. index.js + inject.js  发送审计（所有出站写记一行，假成功可见）
  11. bridge/events.js     统一事件适配层（notice 不再被丢）
  12. tools.js + inject.js 写操作统一过闸（表情回应/拍一拍/代理）
+ 13. index.js + outbox.js  Python 侧发送走同一道闸门
 
 用法（在服务器上，以 root）：
     python3 apply_local_patches.py            # 打补丁
@@ -1174,6 +1175,52 @@ def patch_send_gateway(apply_):
     return "已打"
 
 
+def patch_outbox(apply_):
+    """出站队列：Python 侧（scheduler / 告警）通过 qq-outbox.jsonl 走同一道闸门。
+
+    以前 Python 想发 QQ 只能塞一条"假用户消息"进 qq-inject.jsonl——那是入站通道，
+    语义完全错（她会当成主人说话），重启还会丢。现在统一走 outbox：
+    限流 / dry-run 拦截 / 气泡分合 / 审计 / 真实 message_id 一个都不落。
+    """
+    src = os.path.join(BASE, "outbox.js")
+    dst = os.path.join(LIB, "outbox.js")
+    idx = os.path.join(LIB, "index.js")
+
+    have = os.path.isfile(dst) and "OUTBOX" in rd(idx)
+    if have:
+        return "已打"
+    if not os.path.isfile(src):
+        return "跳过（没有 /opt/dsh/outbox.js）"
+    if not apply_:
+        return "未打"
+
+    if not os.path.isfile(dst):
+        shutil.copy2(src, dst)
+
+    s1 = rd(idx)
+    if "OUTBOX" not in s1:
+        s1 = s1.replace("let OneBotConnection;", "let OneBotConnection;" + chr(10) + "let startOutbox;", 1)
+        s1 = s1.replace(
+            "    ({ installSendAudit } = await import('./send-audit.js'));",
+            "    ({ installSendAudit } = await import('./send-audit.js'));"
+            + chr(10) + "    // local patch (OUTBOX): Python 侧通过 outbox 走同一道发送闸门"
+            + chr(10) + "    ({ startOutbox } = await import('./outbox.js'));", 1)
+        # 必须放在 bridge 构造之后（放前面会 TDZ：Cannot access 'bridge' before initialization）
+        marker = "    const bridge = new ChatBridge({"
+        i0 = s1.find(marker)
+        if i0 < 0:
+            return "跳过（index.js 找不到 ChatBridge 构造）"
+        j0 = s1.find(chr(10) + "    });" + chr(10), i0)
+        if j0 < 0:
+            return "跳过（找不到 bridge 构造结尾）"
+        j0 += len(chr(10) + "    });" + chr(10))
+        call = (chr(10) + "    // local patch (OUTBOX): 消费 media/onebot/qq-outbox.jsonl（统一过 guard）"
+                + chr(10) + "    startOutbox({ dir: mediaDir, bridge, log, intervalMs: 2000 });" + chr(10))
+        s1 = s1[:j0] + call + s1[j0:]
+        wr(idx, s1)
+    return "已打"
+
+
 PATCHES = [
     ("prompt.js  长期记忆注入", patch_prompt),
     ("bridge.js  时间后缀 + 静音系统播报", patch_bridge),
@@ -1189,6 +1236,7 @@ PATCHES = [
     ("发送审计（真实 message_id 才算发出）", patch_send_audit),
     ("事件适配层 events.js（notice 不再被丢）", patch_event_adapter),
     ("写操作统一过闸（表情回应/拍一拍/代理）", patch_send_gateway),
+    ("outbox（Python 走发送闸门）", patch_outbox),
 ]
 
 

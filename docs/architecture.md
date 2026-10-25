@@ -125,22 +125,39 @@ checkall 第 16 段直接调它，未接线项当场 FAIL。
 
 ---
 
-## ⑤ 统一调度器 🟡（方向已对，形态未到）
+## ⑤ 统一调度器 ✅（2026-10-26 已上线，真机验证待登录）
 
 **现状**：`proactive.py` + 一堆 systemd timer + `qq-inject.jsonl` 混着用。
 已经改掉的是**日记**：`diary_outband.py` 带外触发，不再伪装成主人消息。
 
 **剩下的**：主动私聊、空间说说、B 站窗口仍走 `qq-inject.jsonl`，本质还是"任务变成一条用户消息"。
 
-**最小可做**：`scheduler.py` 只产出**意图**：
+**已实现**：
 
-```json
-{"kind": "diary.write", "reason": "noon", "budget": "low"}
-{"kind": "chat.initiate", "reason": "idle 3h", "chat": "private:1709392682"}
+```
+scheduler.py（每 10 分钟，systemd timer）
+   ├─ decide()  按 routines.json 的时间窗/配额/空闲产出意图 → memory/intents.jsonl
+   └─ run()     消费 state=new 的意图：
+                  chat.initiate → 生成一句话 → qq-outbox.jsonl
+                  diary.write   → diary_outband.py
+                  qzone.post    → 空间脚本
+
+qq-outbox.jsonl → bridge 的 startOutbox() → guardedConnectionCall
+                  → 结果写 qq-outbox.result.jsonl（含真实 message_id）
 ```
 
-意图由执行器消费：`diary.write → diary_outband.py`、`chat.initiate → 生成内容 → send_gateway`。
-**意图绝不直接变成用户消息。**
+三条约束都落地了：
+1. **意图不变成用户消息**（走 outbox，不走 qq-inject）
+2. **Python 也过闸门**（限流 / dry-run / 审计 / 真实 id）
+3. **失败可重试**（发送失败回退读位 + 60 秒退避，不会"消费掉但没发出去"）
+
+旧的 `proactive.timer` 已停用，`scheduler.timer` 接管。
+
+踩到的两个坑（都写进代码注释了）：
+- **TDZ**：`startOutbox` 接在 `const bridge` 之前 → `Cannot access 'bridge' before initialization`，插件静默失效
+- **启动即消费**：WS 还没连上就读走队列 → 消息丢失；改成"失败回退读位"
+
+checkall 第 18 段：scheduler 是否在跑、旧 timer 是否残留、待办意图数、outbox 24h 成败。
 
 ---
 
