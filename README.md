@@ -162,7 +162,7 @@ DSH（Node，systemd 常驻）
 
 ```
 preflight.sh   静态检查：文件引用、语法、占位符、密钥、文档一致性        ← 71 项，都过
-单元测试        纯函数与安全边界                                      ← 132 个用例，都过
+单元测试        纯函数与安全边界                                      ← 137 个用例，都过
 deploy.sh      配置校验的 6 个分支（缺配置/空值/CRLF/非法号/占位符/透传）  ← 沙箱桩测过
 verify.sh      部署实况：系统、服务、模型、真发一张图测看图            ← 在已有部署上跑过
 ```
@@ -287,7 +287,7 @@ persona/
   TEMPLATE.md       人设骨架（{{占位符}}，按描述填）
   example-jingjing.md  示例角色（151 行，可直接用）
 stack/              运行时主体：27 个 Python 脚本（7 个 MCP + 定时任务 + 工具）+ 配置模板 + systemd
-tests/              132 个单元测试（纯函数 + 安全边界 + 解析兜底）
+tests/              137 个单元测试（纯函数 + 安全边界 + 解析兜底）
 scripts/            preflight 的 Python 侧检查 + 生成 README 配图
 .github/workflows/  CI：语法、密钥扫描、换行、占位符、单元测试
 ```
