@@ -484,9 +484,10 @@ print("   SSH 22 对外：%s" % ("是（正常）" if out else "未监听？"))
 
 # ---------------- 14. 备份 ----------------
 sec("14. 备份")
+# 插件代码的 .bak 现在统一放在 backups/lib-baks/（lib 里留 .bak 会让快照对比失败）
 for pat, label in (("profiles/web/cordis.patch.yml.bak-*", "配置"),
                    ("media/onebot/persona.md.bak-*", "人设"),
-                   ("profiles/web/node_modules/dsh-onebot-qq/lib/*.bak-*", "插件代码")):
+                   ("backups/lib-baks/*.bak*", "插件代码")):
     rc, out, _ = sh("ls -1 /opt/dsh/%s 2>/dev/null | wc -l" % pat)
     (ok if out and int(out) > 0 else warn)("%s备份 %s 份" % (label, out or "0"))
 
