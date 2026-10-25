@@ -161,6 +161,19 @@ def gen_line(hint):
     return text[:200]
 
 
+
+
+def _outbox_pending():
+    """outbox 里还没被消费的条数（掉线时别往里堆）。"""
+    try:
+        q = os.path.join(BASE, "media", "onebot", "qq-outbox.jsonl")
+        r = os.path.join(BASE, "media", "onebot", "qq-outbox.result.jsonl")
+        nq = sum(1 for ln in io.open(q, encoding="utf-8") if ln.strip())
+        nr = sum(1 for ln in io.open(r, encoding="utf-8") if ln.strip()) if os.path.isfile(r) else 0
+        return max(0, nq - nr)
+    except Exception:
+        return 0
+
 def pending():
     if not os.path.isfile(INTENTS):
         return []
@@ -221,10 +234,15 @@ def run(dry=False):
             if dry:
                 print("（dry）%s → %s" % (it.get("reason"), text))
                 continue
+            # 掉线时别堆：队列超过 3 条就先不发（否则登录一恢复会一次性全轰出去）
+            if _outbox_pending() >= 3:
+                log("outbox 积压 %d 条，暂缓发送 reason=%s" % (_outbox_pending(), it.get("reason")))
+                continue
             os.makedirs(os.path.dirname(OUTBOX), exist_ok=True)
             with io.open(OUTBOX, "a", encoding="utf-8") as f:
                 f.write(json.dumps({"chat_id": it.get("chat_id", CHAT), "text": text,
-                                    "source": "proactive:" + str(it.get("reason"))},
+                                    "source": "proactive:" + str(it.get("reason")),
+                                    "ts": int(time.time())},
                                    ensure_ascii=False) + "\n")
             log("chat.initiate → outbox: %s" % text[:60])
             done.append(it)

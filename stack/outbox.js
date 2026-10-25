@@ -24,6 +24,8 @@ export function startOutbox({ dir, bridge, log, intervalMs = 2000 }) {
     const resultPath = join(dir, RESULT);
     let consumed = 0;
     let busy = false;
+    // 发送失败后退避：掉线时每 2 秒重试一次会把日志刷爆（实测）
+    let backoffUntil = 0;
 
     const appendResult = async (row) => {
         try {
@@ -35,6 +37,17 @@ export function startOutbox({ dir, bridge, log, intervalMs = 2000 }) {
     };
 
     const sendOne = async (job) => {
+        // 过期任务丢弃：掉线太久之后补发一堆「刚睡醒」没有意义（实测会一次轰出去）
+        const ageS = Date.now() / 1000 - Number(job.ts || 0);
+        if (job.ts && ageS > 1800) {
+            await appendResult({ ts: Math.floor(Date.now() / 1000), ok: false, expired: true,
+                                 source: String(job.source || 'outbox'), chat_id: String(job.chat_id || ''),
+                                 error: 'expired: ' + Math.round(ageS / 60) + ' 分钟未发出' });
+            if (log)
+                log('info', '[outbox] 丢弃过期任务 source=' + String(job.source)
+                    + '（' + Math.round(ageS / 60) + ' 分钟）');
+            return true;
+        }
         const chatId = String(job.chat_id ?? '');
         const text = String(job.text ?? '');
         const source = String(job.source ?? 'outbox');
@@ -44,7 +57,7 @@ export function startOutbox({ dir, bridge, log, intervalMs = 2000 }) {
         const target = Number(parts[1]);
         if ((kind !== 'private' && kind !== 'group') || !Number.isFinite(target) || text.trim() === '') {
             await appendResult({ ts: started, ok: false, source, error: 'bad job: chat_id/text', chat_id: chatId });
-            return;
+            return false;
         }
         const params = kind === 'group' ? { group_id: target } : { user_id: target };
         params.message = [{ type: 'text', data: { text } }];
@@ -61,20 +74,24 @@ export function startOutbox({ dir, bridge, log, intervalMs = 2000 }) {
             if (log)
                 log('info', '[outbox] 已发送 source=' + source + ' chat=' + chatId
                     + (id === -1 ? '（被 dry-run 拦截）' : ' id=' + String(id)));
+            return true;
         }
         catch (error) {
             await appendResult({
                 ts: started, ok: false, source, chat_id: chatId,
                 error: String(error && error.message ? error.message : error).slice(0, 160),
             });
+            const msg = String(error && error.message ? error.message : error);
             if (log)
-                log('warn', '[outbox] 发送失败 source=' + source + ' chat=' + chatId + ': '
-                    + String(error && error.message ? error.message : error).slice(0, 120));
+                log('warn', '[outbox] 发送失败 source=' + source + ' chat=' + chatId + ': ' + msg.slice(0, 120));
+            return msg;
         }
     };
 
     const tick = async () => {
         if (busy)
+            return;
+        if (Date.now() < backoffUntil)
             return;
         busy = true;
         try {
@@ -83,32 +100,44 @@ export function startOutbox({ dir, bridge, log, intervalMs = 2000 }) {
                 text = await readFile(path, 'utf8');
             }
             catch (e) {
-                if (e && e.code === 'ENOENT')
-                    return;
                 return;
             }
             if (text.length < consumed)
                 consumed = 0;                       // 文件被清空/轮转
-            const fresh = text.slice(consumed);
-            const nl = fresh.lastIndexOf('\n');
-            if (nl < 0)
-                return;                             // 还没写完整行
-            const chunk = fresh.slice(0, nl + 1);
-            consumed += chunk.length;
-            for (const line of chunk.split('\n')) {
-                const trimmed = line.trim();
-                if (trimmed === '')
+            let offset = consumed;
+            while (true) {
+                const nl = text.indexOf('\n', offset);
+                if (nl < 0)
+                    break;                          // 没有完整行
+                const line = text.slice(offset, nl).trim();
+                const lineBytes = nl + 1 - offset;
+                if (line === '') {
+                    offset = nl + 1;
+                    consumed = offset;
                     continue;
+                }
                 let job;
                 try {
-                    job = JSON.parse(trimmed);
+                    job = JSON.parse(line);
                 }
                 catch (e) {
                     if (log)
-                        log('warn', '[outbox] 行解析失败，跳过：' + trimmed.slice(0, 80));
+                        log('warn', '[outbox] 行解析失败，跳过：' + line.slice(0, 80));
+                    offset = nl + 1;
+                    consumed = offset;
                     continue;
                 }
-                await sendOne(job);
+                const ok = await sendOne(job);
+                if (ok !== true) {
+                    backoffUntil = Date.now() + 60000;   // 失败后退避 60 秒再试
+                    break;
+                }
+                if (!ok && ok !== undefined && String(ok).indexOf('not connected') >= 0)
+                    break;                          // 没连上：保留这一行，下轮重试
+                if (ok === false)
+                    break;                          // 其它失败也先停，避免连续撞墙
+                offset = nl + 1;
+                consumed = offset;
             }
         }
         finally {

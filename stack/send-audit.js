@@ -142,3 +142,21 @@ export function installSendAudit(connection, options) {
 export function sendAuditStats() {
     return { ...stats, path: auditPath };
 }
+
+/**
+ * 记录一次「被 dry-run 拦下」的出站。
+ * 这条路不经过 connection.call（guard 直接 return 了），所以必须单独记，
+ * 否则审计里全是 ok，看不出"其实没发"。
+ */
+export function noteIntercept(action, params) {
+    stats.total += 1;
+    stats.intercepted += 1;
+    write({
+        ts: Math.floor(Date.now() / 1000),
+        action: String(action),
+        target: targetOf(params),
+        ok: false,
+        intercepted: true,
+        ms: 0,
+    });
+}
