@@ -9,6 +9,7 @@ import os
 import re
 import stat
 import subprocess
+import io
 import sys
 import urllib.request
 
@@ -478,6 +479,47 @@ for pat, label in (("profiles/web/cordis.patch.yml.bak-*", "配置"),
                    ("profiles/web/node_modules/dsh-onebot-qq/lib/*.bak-*", "插件代码")):
     rc, out, _ = sh("ls -1 /opt/dsh/%s 2>/dev/null | wc -l" % pat)
     (ok if out and int(out) > 0 else warn)("%s备份 %s 份" % (label, out or "0"))
+
+# ---------------- 15. 发送审计 ----------------
+sec("15. 发送审计")
+AUDIT = "/opt/dsh/media/onebot/send_audit.jsonl"
+try:
+    import collections
+    import json as _json
+    import time as _time
+    since = _time.time() - 86400
+    c = collections.Counter()
+    for line in io.open(AUDIT, encoding="utf-8"):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = _json.loads(line)
+        except Exception:
+            continue
+        if float(row.get("ts") or 0) < since:
+            continue
+        if row.get("intercepted"):
+            c["intercepted"] += 1
+        elif row.get("fake"):
+            c["fake"] += 1
+        elif row.get("error"):
+            c["fail"] += 1
+        elif row.get("ok"):
+            c["ok"] += 1
+    total = sum(c.values())
+    if total == 0:
+        warn("最近 24h 没有发送记录（刚装或没在跑？）")
+    else:
+        (bad if c["fake"] else ok)(
+            "真实发出 %d 条｜注入拦截 %d 条｜失败 %d 条｜假成功 %d 条"
+            % (c["ok"], c["intercepted"], c["fail"], c["fake"]))
+        if c["fake"]:
+            bad("假成功：send_* 没拿到真实 message_id（看 %s）" % AUDIT)
+        if c["fail"]:
+            warn("发送失败 %d 条（多数是重启瞬间的 transport stopped）" % c["fail"])
+except Exception as e:
+    warn("读不到发送审计：%s" % e)
 
 # ---------------- 总结 ----------------
 print()

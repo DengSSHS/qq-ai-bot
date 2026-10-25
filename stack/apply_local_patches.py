@@ -18,6 +18,8 @@
   8. bridge.js  气泡上限 3→6（长回复保持分散，不再合并成长条）
   9. chat/inbound/bridge/tools/prompt  引用回复 + 表情回应 + 拍一拍（入站+出站）
  10. index.js + inject.js  发送审计（所有出站写记一行，假成功可见）
+ 11. bridge/events.js     统一事件适配层（notice 不再被丢）
+ 12. tools.js + inject.js 写操作统一过闸（表情回应/拍一拍/代理）
 
 用法（在服务器上，以 root）：
     python3 apply_local_patches.py            # 打补丁
@@ -1098,6 +1100,80 @@ def patch_event_adapter(apply_):
     return "已打"
 
 
+def patch_send_gateway(apply_):
+    """写操作统一过闸：表情回应 / 拍一拍 / napcat 代理都走 guardedConnectionCall。
+
+    为什么：这三处原来直接调 connection.call，绕过了 guard 的 dry-run 拦截——
+    实测踩过：dry 测试时"拍一下"，**真的拍到了主人**（friend_poke 直接发出去）。
+    顺带把 isWriteAction 扩到 poke / 表情回应，否则 dry-run 仍然拦不住。
+    """
+    tl = os.path.join(LIB, "tools.js")
+    inj = os.path.join(LIB, "inject.js")
+    st = rd(tl)
+    si = rd(inj)
+    todo = []
+
+    def sub(text, old, new, tag):
+        # 线上文本可能被手工微调过：按功能标记判断，四项各自独立
+        if tag == "isWriteAction":
+            if "poke / 表情回应也算写操作" in text or "friend_poke' || a === 'group_poke" in text:
+                return text
+        elif "SEND_GATEWAY" in text and tag in ("emoji", "poke", "proxy"):
+            return text
+        if new in text:
+            return text
+        if old not in text:
+            todo.append(tag + "（锚点没找到）")
+            return text
+        todo.append(tag)
+        return text.replace(old, new, 1)
+
+    st = sub(st,
+             "            await connection.call('set_msg_emoji_like', { message_id: Number(mid), emoji_id: emoji });",
+             "            // local patch (SEND_GATEWAY): 走统一出口（guard 负责 dry-run 拦截/审计/限流）"
+             + chr(10) + "            await bridge.guardedConnectionCall('set_msg_emoji_like', { message_id: Number(mid), emoji_id: emoji });",
+             "emoji")
+
+    st = sub(st,
+             "            await connection.call(info.kind === 'group' ? 'group_poke' : 'friend_poke', params);",
+             "            // local patch (SEND_GATEWAY): 走统一出口（否则测试时会真的拍人）"
+             + chr(10) + "            await bridge.guardedConnectionCall(info.kind === 'group' ? 'group_poke' : 'friend_poke', params);",
+             "poke")
+
+    st = sub(st,
+             "            return await connection.call(a.action, params);",
+             "            // local patch (SEND_GATEWAY): 写操作统一过闸；只读的仍直连（少一层开销）"
+             + chr(10) + "            if (/^(send_|set_|delete_|upload_|friend_poke|group_poke)/.test(String(a.action)))"
+             + chr(10) + "                return await bridge.guardedConnectionCall(a.action, params);"
+             + chr(10) + "            return await connection.call(a.action, params);",
+             "proxy")
+
+    si = sub(si,
+             "export function isWriteAction(action) {"
+             + chr(10) + "    return action.startsWith('send_') || action.startsWith('set_') || action === 'delete_msg';"
+             + chr(10) + "}",
+             "export function isWriteAction(action) {"
+             + chr(10) + "    // local patch (SEND_GATEWAY): poke / 表情回应也算写操作，"
+             + chr(10) + "    // 否则 dry-run 拦不住——测试时会真的拍人、真的贴表情（实测踩过）。"
+             + chr(10) + "    const a = String(action);"
+             + chr(10) + "    return a.startsWith('send_') || a.startsWith('set_') || a.startsWith('upload_')"
+             + chr(10) + "        || a === 'delete_msg' || a === 'friend_poke' || a === 'group_poke'"
+             + chr(10) + "        || a === 'set_msg_emoji_like';"
+             + chr(10) + "}",
+             "isWriteAction")
+
+    missing = [t for t in todo if "锚点" in t]
+    if missing:
+        return "跳过（%s）" % "、".join(missing)
+    if not todo:
+        return "已打"
+    if not apply_:
+        return "未打"
+    wr(tl, st)
+    wr(inj, si)
+    return "已打"
+
+
 PATCHES = [
     ("prompt.js  长期记忆注入", patch_prompt),
     ("bridge.js  时间后缀 + 静音系统播报", patch_bridge),
@@ -1112,6 +1188,7 @@ PATCHES = [
     ("引用回复 / 表情回应 / 拍一拍（入站+出站）", patch_reply_poke_emoji),
     ("发送审计（真实 message_id 才算发出）", patch_send_audit),
     ("事件适配层 events.js（notice 不再被丢）", patch_event_adapter),
+    ("写操作统一过闸（表情回应/拍一拍/代理）", patch_send_gateway),
 ]
 
 

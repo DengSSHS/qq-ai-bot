@@ -2,6 +2,57 @@
 
 本项目按「改了什么 + 为什么」记录，不按版本号堆功能。所有日期为实际改动日期。
 
+## v0.9.4 — 2026-10-26 · 写操作统一过闸（第 2 条的正身）
+
+上一版只做了审计（看清发没发），这版把**出口真正收成一道闸**。
+
+### 找到的三处绕过
+
+`outbound` 早就走 `guardedConnectionCall` 了，真正绕过去的是：
+
+| 位置 | 后果 |
+|---|---|
+| `tools.js` 的 `set_msg_emoji_like` | dry-run 拦不住，测试时会真的贴表情 |
+| `tools.js` 的 `friend_poke` / `group_poke` | **dry 测试时真的把主人拍了**（实测踩到） |
+| `tools.js` 的 `qq_napcat_api` 代理 | 任意写操作都能绕过限流/审计 |
+
+加上 `isWriteAction()` 只认 `send_/set_/delete_msg`，poke 根本不算写操作 → 连 guard 都不会进。
+
+### 改法
+
+1. 上面三处改成 `bridge.guardedConnectionCall(...)`（只读的仍直连，少一层开销）
+2. `isWriteAction` 扩到 `upload_*` / `friend_poke` / `group_poke` / `set_msg_emoji_like`
+3. checkall 新增第 15 段：读 `send_audit.jsonl` 统计 24h
+   `真实发出 / 注入拦截 / 失败 / 假成功`，**假成功 > 0 直接 FAIL**
+
+### 实测
+
+```
+改前：friend_poke -> ok（真的发出去了）
+改后：friend_poke -> intercepted（dry 拦住了）
+      set_msg_emoji_like -> intercepted
+checkall: [OK] 真实发出 9 条｜注入拦截 19 条｜失败 3 条｜假成功 0 条
+```
+
+失败那 3 条是重启瞬间的 `set_input_status: OneBot transport stopped`，属于预期。
+
+### 现在的出口形状
+
+```
+最终回复 / interim / 主动消息 / 工具发送 / 表情回应 / 拍一拍 / 代理
+                        ↓
+        bridge.guardedConnectionCall（唯一闸门）
+        限流 · dry-run 拦截 · 旁白剥离 · 气泡分合 · human pace
+                        ↓
+                connection.call → send_audit 记一行（真实 id 才算发出）
+                        ↓
+                      OneBot WS
+```
+
+剩一处**故意**不走闸：`sendBubbles` 内部逐条发（已在闸内分好条，再进闸会无限递归）。
+
+13 项补丁全部「已打」，fork 快照刷新（30 文件）。
+
 ## v0.9.3 — 2026-10-26 · 发送审计（第 2 条的第一步：让"假成功"可见）
 
 不做大改，只做一件事：**把"到底发没发"变成可查的事实**。
