@@ -261,7 +261,7 @@ def main():
                 continue
             inject(r["prompt"])
             st["fired"][rid + "@" + hour_bucket] = now.isoformat()
-            st["count"] += 1
+            # 只记自己的额度，别占全局 count（否则日记提醒会被饿死）
             st[ckey] = int(st.get(ckey) or 0) + 1
             log("fired %s at %s (idle=%.0fm prob=%.2f count=%d)"
                 % (rid, now.strftime("%H:%M"), idle, prob, st["count"]))
@@ -281,10 +281,9 @@ def main():
             continue
         if rid in st["fired"]:
             continue
-        if st["count"] >= budget:
-            if dry:
-                print("[%s] 今日预算已用完（%d）" % (rid, budget))
-            break
+        # 定时型 routine 每天只触发一次（靠 fired 记账），不再受全局额度限制。
+        # 以前这里 break，导致主动私聊把 count 用满后日记提醒全天不发
+        # （2026-10-25 实测：11:07 count=5，noon/evening 全被挡）。
         need = int(r.get("minIdleMin", 45))
         if idle < need:
             if dry:
