@@ -29,6 +29,7 @@ import urllib.request
 BASE = "/opt/dsh"
 CONF = os.path.join(BASE, "bili_share.conf.json")
 LOG = os.path.join(BASE, "memory/bili-share.jsonl")
+WATCHED = os.path.join(BASE, "memory/bili-watched.jsonl")
 TULPA_URL = "http://127.0.0.1:18777/mcp"
 TULPA_CONN = "/tmp/conn.json"
 
@@ -246,9 +247,82 @@ def call_tool(name, args):
                 bili_budget.record(bili_budget.estimate(res))
         except Exception:
             pass
+        # 看过什么要留痕，否则她事后想不起来（用户 2026-10-25 反馈）
+        if name in ("read_video", "get_video_job"):
+            record_watched(name, args, res)
         return res
     return {"ok": False, "error": {"code": "unknown_tool", "message": name}}
 
+
+def record_watched(name, args, res):
+    """把"看过什么"落一行盘。
+
+    实测返回（2026-10-25）：
+      {"ok":true,"state":"succeeded",
+       "result":{"bvid":"BV...","speech":{"entries":[{"start":0.1,"end":1.1,"content":"..."}]}}}
+    注意 result 里**没有 title**，字幕文字在 entry["content"]（不是 text）。
+    """
+    try:
+        if not isinstance(res, dict) or not res.get("ok"):
+            return
+        body = res.get("result") if isinstance(res.get("result"), dict) else res
+        if str(body.get("state") or "") not in ("", "succeeded"):
+            return
+
+        bvid = str(body.get("bvid") or args.get("bvid") or args.get("video") or "")
+        title = ""
+        for key in ("title", "video_title", "name"):
+            if body.get(key):
+                title = str(body[key])[:120]
+                break
+
+        summary = ""
+        for key in ("summary", "desc", "text"):
+            if body.get(key):
+                summary = str(body[key]).strip()[:200]
+                break
+        if not summary:
+            speech = body.get("speech")
+            if isinstance(speech, dict):
+                ents = speech.get("entries") or []
+                parts = []
+                for e in ents:
+                    if not isinstance(e, dict):
+                        continue
+                    t = (e.get("content") or e.get("text") or "").strip()
+                    if t:
+                        parts.append(t)
+                    if sum(len(x) for x in parts) > 160:
+                        break
+                summary = "".join(parts)[:200]
+
+        speed = ""
+        if isinstance(body.get("speech"), dict):
+            speed = str(body["speech"].get("state") or "")
+
+        # 没标题（多数情况）就用 get_video_info 补一次，否则记录里只有 bvid，
+        # 事后根本想不起是哪个视频。
+        if not title and bvid:
+            try:
+                info = forward("get_video_info", {"video": bvid})
+                ib = info.get("result") if isinstance(info.get("result"), dict) else info
+                for key in ("title", "video_title", "name"):
+                    if isinstance(ib, dict) and ib.get(key):
+                        title = str(ib[key])[:120]
+                        break
+            except Exception as e:
+                log("get_video_info fallback failed: %s" % e)
+
+        if not (bvid or title or summary):
+            return
+        rec = {"ts": int(time.time()), "tool": name, "bvid": bvid,
+               "title": title, "summary": summary, "speech": speed}
+        os.makedirs(os.path.dirname(WATCHED), exist_ok=True)
+        with open(WATCHED, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + chr(10))
+        log("watched logged: %s | %s" % (bvid, (title or summary)[:40]))
+    except Exception as e:
+        log("record_watched failed: %s" % e)
 
 def main():
     for line in sys.stdin:

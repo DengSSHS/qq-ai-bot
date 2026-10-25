@@ -2,6 +2,27 @@
 
 本项目按「改了什么 + 为什么」记录，不按版本号堆功能。所有日期为实际改动日期。
 
+## v0.7.26 — 2026-10-25 · B 站记忆：以前刷过就忘，因为压根没存
+
+不是检索坏了，是**根本没存**：`bili-share.jsonl` 只记分享、`bili-window.log` 只记开窗，
+日记里只有 2 条偶然提到 B 站。刷了 5 个视频没分享也没写日记 → 等于没发生过。
+
+- `bili_hub.py`：`read_video` / `get_video_job` 成功后追加到 `memory/bili-watched.jsonl`
+- `memory_server.py`：新增 `bili_watched(query, n)` 工具（按标题/摘要搜，不传就返回最近）
+- `MEM_HINT` 与人设里点名：问到 B 站看过什么用 `bili_watched`
+
+三个靠真实返回才发现的坑：
+
+1. `bvid` 在 `result` 里不在顶层（第一版记录永远是空的）
+2. 字幕文字字段是 `content` 不是 `text`（用 text 取到空字符串）
+3. 返回里**没有 title** → 没字幕的视频记录等于废的；没标题时补一次 `get_video_info`，
+   并记下字幕状态（available/unavailable）
+
+自验：真实流程写入成功；字幕可用时 summary 是字幕拼的；不可用时标题从 info 补上；
+`bili_watched` 命中正常；tests 137 / preflight 72-0。
+
+未验：一次“刷完隔天问”的真实闭环（需等一天）。
+
 ## v0.7.25 — 2026-10-25 · 群聊查不到日记/B 站记录 + B 站窗口提前到晚 6 点
 
 **① 群聊里“想不起来”**：查两个群的实际会话——系统提示里长期记忆确实注入了、

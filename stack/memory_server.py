@@ -7,6 +7,7 @@
 """
 import json
 import os
+import time
 import re
 import sys
 import traceback
@@ -19,6 +20,7 @@ import search_index
 BASE = os.environ.get("MEMORY_DIR", "/opt/dsh/memory")
 DIARY = os.path.join(BASE, "diary")
 NOTES = os.path.join(BASE, "notes.md")
+WATCHED = os.path.join(BASE, "bili-watched.jsonl")
 OWNER_NICK = os.environ.get("OWNER_NICK", "主人")
 LOG = os.path.join(BASE, "server.log")
 PROTO = "2024-11-05"
@@ -135,6 +137,46 @@ def tool_diary_search(args):
     return "\n\n".join("### %s\n%s" % (h, b) for h, b in final)
 
 
+def tool_bili_watched(args):
+    """按关键词回忆"我在 B 站看过什么"。数据来自 bili_hub 的自动记录。"""
+    q = (args.get("query") or "").strip()
+    n = int(args.get("n") or 5)
+    n = max(1, min(n, 20))
+    rows = []
+    try:
+        with open(WATCHED, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    r = json.loads(line)
+                except Exception:
+                    continue
+                hay = " ".join(str(r.get(k) or "") for k in ("title", "summary", "bvid"))
+                if q and q not in hay:
+                    continue
+                rows.append(r)
+    except FileNotFoundError:
+        return "还没有 B 站浏览记录（这功能是新的，之前的没存）。"
+    except Exception as e:
+        return "读浏览记录失败：%s" % e
+    if not rows:
+        return "记录里没有跟「%s」相关的视频。" % q if q else "还没有 B 站浏览记录。"
+    rows = rows[-n:][::-1]
+    out = []
+    for r in rows:
+        ts = time.strftime("%m-%d %H:%M", time.localtime(int(r.get("ts") or 0)))
+        title = r.get("title") or r.get("bvid") or "（无标题）"
+        line = "- %s %s" % (ts, title)
+        if r.get("bvid"):
+            line += "（https://www.bilibili.com/video/%s）" % r["bvid"]
+        if r.get("summary"):
+            line += chr(10) + "  " + str(r["summary"])[:160]
+        out.append(line)
+    return "我看过的（最近 %d 条）：%s%s" % (len(out), chr(10), chr(10).join(out))
+
+
 def tool_notes_read(args):
     ensure()
     with open(NOTES, encoding="utf-8") as f:
@@ -201,6 +243,18 @@ TOOLS = [
         },
     },
     {
+        "name": "bili_watched",
+        "description": "回忆自己在 B 站看过什么（按标题/摘要关键词搜）。"
+                       "被问到「你之前刷到什么」「那个视频」时用它；不传 query 就返回最近的。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "关键词，可省略"},
+                "n": {"type": "integer", "description": "最多几条，默认 5"},
+            },
+        },
+    },
+    {
         "name": "notes_read",
         "description": "读长期笔记（主人是谁、常混的群、反复出现的梗）。不确定对方是谁、或者想确认设定时读一次。",
         "inputSchema": {"type": "object", "properties": {}},
@@ -223,6 +277,7 @@ HANDLERS = {
     "diary_write": tool_diary_write,
     "diary_recent": tool_diary_recent,
     "diary_search": tool_diary_search,
+    "bili_watched": tool_bili_watched,
     "notes_read": tool_notes_read,
     "notes_write": tool_notes_write,
 }
