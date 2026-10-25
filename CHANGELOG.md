@@ -2,6 +2,68 @@
 
 本项目按「改了什么 + 为什么」记录，不按版本号堆功能。所有日期为实际改动日期。
 
+## v0.9.0 — 2026-10-26 · 引用回复 / 表情回应 / 拍一拍（入站 + 出站）
+
+四件事，两件是补缺口，两件是新增能力。
+
+### ① 引用：入站早有，出站从来没有
+
+`get_msg` 展开一直在（`inbound.expandQuote`），但**她从来不会引用某条消息再回**——
+这就是"群聊理解力最大短板"的体感来源。
+
+新增 `qq_reply(message_id, text)`：发 `[{type:'reply'},{type:'text'}]`，
+QQ 里就是标准的引用块。
+
+### ② message_id 进上下文（前置修复）
+
+`<user_message qq="…" nickname="…">` 原本**没有 message_id**，
+这意味着 `qq_reply` / `qq_emoji_like` 即使存在也没有目标可用（第一版实测踩到）。
+现在包装里带上 `message_id="…"`，平台提示里也写明"用它去引用/贴表情"。
+
+### ③ 拍一拍入站（原来直接丢弃）
+
+「拍一拍」是 `notice` 事件（`notice_type=notify, sub_type=poke`），
+原管线 `normalizeOneBot11` 只认 `message` → 走到 `非聊天消息事件，不处理` 就结束了。
+
+现在 `bridge.handlePokeNotice()` 把「拍的是她」合成一条入站消息：
+
+```
+[拍一拍] 神神很衰 拍了拍你（这是 QQ 的「拍一拍」动作，不是发消息）
+```
+
+同人 3 秒内连拍合并；拍别人不管。
+
+### ④ 表情回应（零 token 的轻互动）
+
+`qq_emoji_like(message_id, emoji_id='76')` → NapCat `set_msg_emoji_like`。
+比回一句话轻得多，也不花 token。同一条消息 1.5 秒冷却。
+
+### ⑤ 拍一拍出站（谨慎版）
+
+`qq_poke(user_id)` → `friend_poke` / `group_poke`：
+
+- 白名单取 `bridge.deps.policy.adminUsers`（**不是 config**，第一版取错导致"没权限"）
+  + `limits.json` 的 `poke_allow` + service 里的 `OWNER_QQ`
+- 冷却 `poke_cooldown_min`（默认 10 分钟），同一对象不重复拍
+
+### 实测
+
+```
+引用回复   「收到」→ 走 reply 段真实发出
+拍入站     [poke] 转成入站消息：[拍一拍] 神神很衰 拍了拍你…
+拍出站     「拍到了。」→ 主人收到拍一拍
+表情回应   注入消息 id 是造的 → msg not found（正常）；需真实消息验证
+```
+
+### 工程细节（记下来，避免重踩）
+
+- `apply_local_patches` 第 9 个补丁用「功能标记」判断已打（MSG_ID_ATTR / POKE_IN /
+  QQ_REPLY_POKE_EMOJI / qq_emoji_like），不做逐字比对——线上文本手工微调过，
+  逐字比对会误判成"未打"并重复插入。
+- 服务 unit 增加 `Environment=OWNER_QQ=…`，让白名单不依赖配置项是否存在。
+
+文档：`docs/qq-interaction.md`。
+
 ## v0.8.2 — 2026-10-26 · 气泡默认不限条数（接口保留）
 
 用户：「我不要限制，不过预留接口」。

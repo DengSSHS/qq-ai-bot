@@ -16,6 +16,7 @@
   6. inject.js + bridge.js  注入事件带 dry_run 时只拦这一轮出站（测试不打扰主人）
   7. inbound.js + prompt.js 三层记忆接线：每轮检索大记忆库 + 注入临时层摘要
   8. bridge.js  气泡上限 3→6（长回复保持分散，不再合并成长条）
+  9. chat/inbound/bridge/tools/prompt  引用回复 + 表情回应 + 拍一拍（入站+出站）
 
 用法（在服务器上，以 root）：
     python3 apply_local_patches.py            # 打补丁
@@ -531,8 +532,14 @@ def patch_mem_layers(apply_):
     sp = rd(pr)
     todo = []
 
+    MARKERS = {
+        "chat.js message_id": "MSG_ID_ATTR",
+        "prompt.js 平台提示": "qq_emoji_like",
+    }
+
     def sub(text, old, new, tag):
-        if new in text:
+        mk = MARKERS.get(tag)
+        if new in text or (mk is not None and mk in text):
             return text
         if old not in text:
             todo.append(tag + "（锚点没找到）")
@@ -661,6 +668,296 @@ def patch_bubble_spread(apply_):
     return "已打"
 
 
+def patch_reply_poke_emoji(apply_):
+    """引用回复 / 表情回应 / 拍一拍（入站 + 出站）。
+
+    1. message_id 进上下文：`<user_message … message_id="…">`。
+       不带的话她拿不到 id，qq_reply / qq_emoji_like 全是摆设（实测踩过）。
+    2. notice 入口：QQ 的「拍一拍」是 notice（notice_type=notify, sub_type=poke），
+       原管线只认 message，这一拍在桥接层就被丢了 → 合成一条入站消息给她回应。
+    3. 三个工具：qq_reply（引用回复）、qq_emoji_like（表情回应，零 token）、
+       qq_poke（拍一拍，白名单 + 冷却，只对主人/熟人）。
+    """
+    br = os.path.join(LIB, "bridge.js")
+    ch = os.path.join(LIB, "chat.js")
+    ib = os.path.join(LIB, "inbound.js")
+    tl = os.path.join(LIB, "tools.js")
+    pr = os.path.join(LIB, "prompt.js")
+
+    # 五处功能标记都在 = 已经打过了。线上文件可能被手工微调过，
+    # 逐字比对会误判成「未打」从而重复插入（踩过一次），所以先用标记兜一层。
+    if ("MSG_ID_ATTR" in rd(ch) and "inbound.messageId" in rd(ib)
+            and "POKE_IN" in rd(br) and "QQ_REPLY_POKE_EMOJI" in rd(tl)
+            and "qq_emoji_like" in rd(pr)):
+        return "已打"
+
+    MARK9 = {
+        "chat.js message_id": "MSG_ID_ATTR",
+        "prompt.js 平台提示": "qq_emoji_like",
+        "bridge 拍一拍": "handlePokeNotice(event) {",
+        "bridge notice 入口": "POKE_IN",
+        "tools.js 三个工具": "QQ_REPLY_POKE_EMOJI",
+    }
+    todo = []
+
+    def sub(text, old, new, tag):
+        mk = MARK9.get(tag)
+        if new in text or (mk is not None and mk in text):
+            return text
+        if old not in text:
+            todo.append(tag + "（锚点没找到）")
+            return text
+        todo.append(tag)
+        return text.replace(old, new, 1)
+
+    # 两处线上文本可能被手工微调过，用功能标记判断「已打」
+    MARK9 = {
+        "chat.js message_id": "MSG_ID_ATTR",
+        "prompt.js 平台提示": "qq_emoji_like",
+        "bridge 拍一拍": "handlePokeNotice(event) {",
+        "tools.js 三个工具": "QQ_REPLY_POKE_EMOJI",
+    }
+    _sub9 = sub
+
+    def sub(text, old, new, tag):
+        mk = MARK9.get(tag)
+        if mk is not None and mk in text:
+            return text
+        return _sub9(text, old, new, tag)
+
+    # ---- 1) message_id 进上下文 ----
+    sc = rd(ch)
+    if "MSG_ID_ATTR" in sc:
+        todo.append("chat.js message_id")
+    sc = sub(sc,
+             "export function wrapUserMessage(content, userId, nickname) {"
+             + chr(10) + "    return '<user_message qq=\"' + userId + '\" nickname=\"' + sanitizeNickname(nickname) + '\">"
+             + chr(10) + "' + content + '" + chr(10) + "</user_message>';",
+             "export function wrapUserMessage(content, userId, nickname, messageId) {"
+             + chr(10) + "    // local patch (MSG_ID_ATTR): message_id 要带进上下文，"
+             + chr(10) + "    // 否则 qq_reply / qq_emoji_like 没有目标可用。"
+             + chr(10) + "    const mid = messageId === undefined || messageId === null || messageId === ''"
+             + chr(10) + "        ? ''"
+             + chr(10) + "        : ' message_id=\"' + String(messageId).replace(/[^0-9A-Za-z_-]/g, '') + '\"';"
+             + chr(10) + "    return '<user_message qq=\"' + userId + '\" nickname=\"' + sanitizeNickname(nickname) + '\"' + mid + '>"
+             + chr(10) + "' + content + '" + chr(10) + "</user_message>';",
+             "chat.js message_id")
+    si = rd(ib)
+    si = sub(si,
+             "        let final = wrapUserMessage(content, userId, nickname);",
+             "        let final = wrapUserMessage(content, userId, nickname, inbound.messageId);",
+             "inbound.js 传 messageId")
+
+    # ---- 2) notice 入口 + 拍一拍 ----
+    sb = rd(br)
+    sb = sub(sb,
+             "                const inbound = normalizeOneBot11(event);",
+             "                // local patch (POKE_IN): 拍一拍是 notice 事件，原逻辑在这里被丢弃"
+             + chr(10) + "                if (event && event.post_type === 'notice' && await this.handlePokeNotice(event)) {"
+             + chr(10) + "                    return;"
+             + chr(10) + "                }"
+             + chr(10) + "                const inbound = normalizeOneBot11(event);",
+             "bridge notice 入口")
+    sb = sub(sb,
+             "    /** Expand a quoted (reply) message into [引用] text via get_msg. */",
+             "    /**"
+             + chr(10) + "     * local patch (POKE_IN): 有人拍了拍她 → 合成一条入站消息，交给她回应。"
+             + chr(10) + "     * QQ 的「拍一拍」是 notice 事件（notice_type='notify', sub_type='poke'），"
+             + chr(10) + "     * 原管线只认 message，所以这一拍会被丢掉。只处理\"拍的是她\"；同人 3 秒内连拍算一次。"
+             + chr(10) + "     */"
+             + chr(10) + "    async handlePokeNotice(event) {"
+             + chr(10) + "        const sub = String(event.notice_type === 'notify' ? event.sub_type : event.notice_type);"
+             + chr(10) + "        if (sub !== 'poke')"
+             + chr(10) + "            return false;"
+             + chr(10) + "        const selfId = String(event.self_id ?? '');"
+             + chr(10) + "        const target = String(event.target_id ?? '');"
+             + chr(10) + "        if (selfId === '' || (target !== '' && target !== selfId))"
+             + chr(10) + "            return false;"
+             + chr(10) + "        const now = Date.now();"
+             + chr(10) + "        this.pokeSeen = this.pokeSeen ?? new Map();"
+             + chr(10) + "        const who = String(event.user_id ?? '');"
+             + chr(10) + "        const isGroup = event.group_id !== undefined && event.group_id !== null;"
+             + chr(10) + "        const key = (isGroup ? 'group:' + String(event.group_id) : 'private:') + who;"
+             + chr(10) + "        if (now - (this.pokeSeen.get(key) ?? 0) < 3000)"
+             + chr(10) + "            return true;"
+             + chr(10) + "        this.pokeSeen.set(key, now);"
+             + chr(10) + "        const sender = (event.sender ?? {});"
+             + chr(10) + "        const label = (typeof sender.card === 'string' && sender.card !== '' ? sender.card"
+             + chr(10) + "            : typeof sender.nickname === 'string' && sender.nickname !== '' ? sender.nickname : who);"
+             + chr(10) + "        const text = '[拍一拍] ' + label + ' 拍了拍你（这是 QQ 的「拍一拍」动作，不是发消息）';"
+             + chr(10) + "        const synthetic = {"
+             + chr(10) + "            post_type: 'message',"
+             + chr(10) + "            message_type: isGroup ? 'group' : 'private',"
+             + chr(10) + "            sub_type: isGroup ? 'normal' : 'friend',"
+             + chr(10) + "            self_id: event.self_id,"
+             + chr(10) + "            user_id: event.user_id,"
+             + chr(10) + "            ...(isGroup ? { group_id: event.group_id } : {}),"
+             + chr(10) + "            message_id: now,"
+             + chr(10) + "            time: event.time !== undefined ? event.time : Math.floor(now / 1000),"
+             + chr(10) + "            raw_message: text,"
+             + chr(10) + "            message: [{ type: 'text', data: { text } }],"
+             + chr(10) + "            sender: event.sender !== undefined ? event.sender : { user_id: event.user_id, nickname: label },"
+             + chr(10) + "        };"
+             + chr(10) + "        try {"
+             + chr(10) + "            this.deps.log('info', '[poke] 转成入站消息：' + text);"
+             + chr(10) + "            await this.handleInbound(synthetic);"
+             + chr(10) + "        }"
+             + chr(10) + "        catch (error) {"
+             + chr(10) + "            this.deps.log('warn', '拍一拍转入站失败: ' + describeError(error));"
+             + chr(10) + "        }"
+             + chr(10) + "        return true;"
+             + chr(10) + "    }"
+             + chr(10) + "    /** Expand a quoted (reply) message into [引用] text via get_msg. */",
+             "bridge 拍一拍")
+
+    # ---- 3) 三个工具 ----
+    st = rd(tl)
+    tool_block = (
+        "    // ── local patch (QQ_REPLY_POKE_EMOJI): 引用回复 / 表情回应 / 拍一拍 ──"
+        + chr(10) + "    const _cool = new Map();"
+        + chr(10) + "    const _readLimits = () => {"
+        + chr(10) + "        try { return JSON.parse(readFileSync((process.env.DSH_HOME || '/opt/dsh') + '/limits.json', 'utf8')); }"
+        + chr(10) + "        catch (e) { return {}; }"
+        + chr(10) + "    };"
+        + chr(10) + "    const _tooSoon = (key, ms) => {"
+        + chr(10) + "        const now = Date.now();"
+        + chr(10) + "        const last = _cool.get(key) ?? 0;"
+        + chr(10) + "        if (now - last < ms)"
+        + chr(10) + "            return Math.ceil((ms - (now - last)) / 1000);"
+        + chr(10) + "        _cool.set(key, now);"
+        + chr(10) + "        return 0;"
+        + chr(10) + "    };"
+        + chr(10) + chr(10)
+        + "    register(defineTool({"
+        + chr(10) + "        name: 'qq_reply',"
+        + chr(10) + "        description: '引用某条消息再回（QQ 的回复引用块）。想明确回应某一句话时用它，比直接发文字更像人。',"
+        + chr(10) + "        parameters: {"
+        + chr(10) + "            message_id: { type: 'string', description: '被引用的消息 id' },"
+        + chr(10) + "            text: { type: 'string', description: '要说的话' },"
+        + chr(10) + "            chat_id: { type: 'string', description: '目标会话；省略时默认当前会话' },"
+        + chr(10) + "        },"
+        + chr(10) + "        output: sendOutput(),"
+        + chr(10) + "        isConcurrencySafe: () => true,"
+        + chr(10) + "        execute: async (args, exec) => {"
+        + chr(10) + "            const a = args;"
+        + chr(10) + "            const chatId = resolveChat(bridge, exec, a.chat_id);"
+        + chr(10) + "            await assertGroupMembership(connection, chatId, a.chat_id);"
+        + chr(10) + "            const mid = String(a.message_id ?? '').trim();"
+        + chr(10) + "            if (mid === '')"
+        + chr(10) + "                throw new Error('qq_reply: message_id 必填');"
+        + chr(10) + "            const text = String(a.text ?? '');"
+        + chr(10) + "            if (text.trim() === '')"
+        + chr(10) + "                throw new Error('qq_reply: text 不能为空');"
+        + chr(10) + "            const messageId = await bridge.sendSegments(chatId, ["
+        + chr(10) + "                { type: 'reply', data: { id: mid } },"
+        + chr(10) + "                { type: 'text', data: { text } },"
+        + chr(10) + "            ]);"
+        + chr(10) + "            return { sent: true, messageId: messageId ?? null, quoted: mid };"
+        + chr(10) + "        },"
+        + chr(10) + "    }));"
+        + chr(10) + chr(10)
+        + "    register(defineTool({"
+        + chr(10) + "        name: 'qq_emoji_like',"
+        + chr(10) + "        description: '给某条消息贴一个 QQ 表情回应（默认 76 = 点赞）。比回一句话更轻、不花 token；同一话题最多一次。',"
+        + chr(10) + "        parameters: {"
+        + chr(10) + "            message_id: { type: 'string', description: '要点表情的消息 id' },"
+        + chr(10) + "            emoji_id: { type: 'string', description: '表情 id，默认 76（点赞）' },"
+        + chr(10) + "        },"
+        + chr(10) + "        output: sendOutput(),"
+        + chr(10) + "        isConcurrencySafe: () => true,"
+        + chr(10) + "        execute: async (args) => {"
+        + chr(10) + "            const a = args;"
+        + chr(10) + "            const mid = String(a.message_id ?? '').trim();"
+        + chr(10) + "            if (mid === '')"
+        + chr(10) + "                throw new Error('qq_emoji_like: message_id 必填');"
+        + chr(10) + "            const emoji = (String(a.emoji_id ?? '').trim() || '76');"
+        + chr(10) + "            const left = _tooSoon('like:' + mid + ':' + emoji, 1500);"
+        + chr(10) + "            if (left > 0)"
+        + chr(10) + "                throw new Error('qq_emoji_like: 冷却中，' + left + ' 秒后再试');"
+        + chr(10) + "            await connection.call('set_msg_emoji_like', { message_id: Number(mid), emoji_id: emoji });"
+        + chr(10) + "            return { ok: true, messageId: mid, emoji };"
+        + chr(10) + "        },"
+        + chr(10) + "    }));"
+        + chr(10) + chr(10)
+        + "    register(defineTool({"
+        + chr(10) + "        name: 'qq_poke',"
+        + chr(10) + "        description: '拍一拍对方（QQ 的拍一拍）。只对主人或白名单里的人用；有冷却。',"
+        + chr(10) + "        parameters: {"
+        + chr(10) + "            user_id: { type: 'string', description: '要拍的人；私聊可省略' },"
+        + chr(10) + "            chat_id: { type: 'string', description: '目标会话；省略时默认当前会话' },"
+        + chr(10) + "        },"
+        + chr(10) + "        output: sendOutput(),"
+        + chr(10) + "        isConcurrencySafe: () => false,"
+        + chr(10) + "        execute: async (args, exec) => {"
+        + chr(10) + "            const a = args;"
+        + chr(10) + "            const chatId = resolveChat(bridge, exec, a.chat_id);"
+        + chr(10) + "            const info = splitChatId(chatId);"
+        + chr(10) + "            const target = String(a.user_id ?? (info.kind === 'private' ? info.target : '')).trim();"
+        + chr(10) + "            if (target === '')"
+        + chr(10) + "                throw new Error('qq_poke: 群聊里必须给 user_id');"
+        + chr(10) + "            const lim = _readLimits();"
+        + chr(10) + "            // 管理员名单在 deps.policy.adminUsers（不是 config）；再并上 poke_allow 与 OWNER"
+        + chr(10) + "            const allow = new Set(["
+        + chr(10) + "                ...(bridge.deps.policy?.adminUsers ?? []),"
+        + chr(10) + "                ...(bridge.deps.config?.adminUsers ?? []),"
+        + chr(10) + "            ].map(String));"
+        + chr(10) + "            const ownerEnv = String(process.env.OWNER_QQ ?? process.env.OWNER ?? '').trim();"
+        + chr(10) + "            if (ownerEnv !== '')"
+        + chr(10) + "                allow.add(ownerEnv);"
+        + chr(10) + "            for (const x of String(lim.poke_allow ?? '').split(',')) {"
+        + chr(10) + "                const v = x.trim();"
+        + chr(10) + "                if (v !== '')"
+        + chr(10) + "                    allow.add(v);"
+        + chr(10) + "            }"
+        + chr(10) + "            if (!allow.has(target))"
+        + chr(10) + "                throw new Error('qq_poke: 只允许拍主人或白名单里的人（limits.json 的 poke_allow）');"
+        + chr(10) + "            const cooldownS = Math.max(1, Number(lim.poke_cooldown_min ?? 10)) * 60;"
+        + chr(10) + "            const left = _tooSoon('poke:' + target, cooldownS * 1000);"
+        + chr(10) + "            if (left > 0)"
+        + chr(10) + "                throw new Error('qq_poke: 刚拍过，' + Math.ceil(left / 60) + ' 分钟后再来');"
+        + chr(10) + "            const params = info.kind === 'group'"
+        + chr(10) + "                ? { group_id: Number(info.target), user_id: Number(target) }"
+        + chr(10) + "                : { user_id: Number(target) };"
+        + chr(10) + "            await connection.call(info.kind === 'group' ? 'group_poke' : 'friend_poke', params);"
+        + chr(10) + "            return { ok: true, target, kind: info.kind };"
+        + chr(10) + "        },"
+        + chr(10) + "    }));"
+        + chr(10) + chr(10)
+    )
+    anchor_tool = ("    return () => {"
+                   + chr(10) + "        for (const dispose of disposers)"
+                   + chr(10) + "            dispose();"
+                   + chr(10) + "    };")
+    st = sub(st, anchor_tool, tool_block + anchor_tool, "tools.js 三个工具")
+
+    # ---- 4) 平台提示 ----
+    sp = rd(pr)
+    if "qq_emoji_like" in sp:
+        todo.append("prompt.js 平台提示")
+    sp = sub(sp,
+             "    platform += '- 群聊消息带 [HH:MM 昵称(QQ)] 前缀，被 @ 时带 [@我]；私聊无前缀。" + chr(10) + "';",
+             "    platform += '- 群聊消息带 [HH:MM 昵称(QQ)] 前缀，被 @ 时带 [@我]；私聊无前缀。" + chr(10) + "';"
+             + chr(10) + "    platform += '- 每条 <user_message> 上有 message_id：要引用回复用 qq_reply(message_id, text)，"
+             + "要贴表情回应用 qq_emoji_like(message_id)（更轻、不花 token）。" + chr(10) + "';"
+             + chr(10) + "    platform += '- 拍一拍：只对主人用 qq_poke()，一天别超过两三次；"
+             + "别人拍你时消息里会出现 [拍一拍]，可以自然回一句。" + chr(10) + "';",
+             "prompt.js 平台提示")
+
+    missing = [t for t in todo if "锚点" in t]
+    if missing:
+        return "跳过（%s）" % "、".join(missing)
+    if not todo:
+        return "已打"
+    if not apply_:
+        return "未打"
+    wr(ch, sc)
+    wr(ib, si)
+    wr(br, sb)
+    wr(tl, st)
+    wr(pr, sp)
+    return "已打"
+
+
 PATCHES = [
     ("prompt.js  长期记忆注入", patch_prompt),
     ("bridge.js  时间后缀 + 静音系统播报", patch_bridge),
@@ -672,6 +969,7 @@ PATCHES = [
      patch_inject_per_event_dry),
     ("mem_layers 三层记忆接线（每轮检索 + 摘要注入）", patch_mem_layers),
     ("bridge.js 气泡默认不限（0=不限，接口保留）", patch_bubble_spread),
+    ("引用回复 / 表情回应 / 拍一拍（入站+出站）", patch_reply_poke_emoji),
 ]
 
 
