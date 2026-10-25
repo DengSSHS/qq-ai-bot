@@ -131,7 +131,8 @@
     groupActivationMinutes: 10
     groupMuteMinutes: 10
     dedupWindowSeconds: 300
-    newMessagePolicy: queue
+    # steer：连着发几条时合并成一次回答（queue 会每条各回一次并播报“已排队”）
+    newMessagePolicy: steer
     interimMessages: false
     interimRecall: true
     deferredTimeoutMs: 0

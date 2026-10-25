@@ -197,7 +197,24 @@ def patch_bridge(apply_):
         return "跳过（找不到目标行）"
     if not apply_:
         return "未打"
-    wr(p, s.replace(old, TIME_SUFFIX, 1))
+    s = s.replace(old, TIME_SUFFIX, 1)
+
+    # 静音两条系统播报：排队提示 / 插话提示。
+    # 连续对话时它们会把聊天刷满「⏳ 已排队」「✅ 已提交」这种机器套话。
+    if "no-queue-notice" not in s:
+        o1 = "        if (!this.queueNoticeChats.has(chatId)) {"
+        n1 = ("        // local patch (no-queue-notice): 不再播报「已排队」\n"
+              "        if (false && !this.queueNoticeChats.has(chatId)) {")
+        if o1 in s:
+            s = s.replace(o1, n1, 1)
+    if "no-steer-notice" not in s:
+        o2 = "            this.sendToChat(chatId, STEER_ACCEPTED_NOTICE).catch((error) => {"
+        n2 = ("            // local patch (no-steer-notice): 不播报「已提交补充指令」\n"
+              "            if (false) this.sendToChat(chatId, STEER_ACCEPTED_NOTICE).catch((error) => {")
+        if o2 in s:
+            s = s.replace(o2, n2, 1)
+
+    wr(p, s)
     return "已打"
 
 
