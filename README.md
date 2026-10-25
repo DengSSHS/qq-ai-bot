@@ -25,6 +25,26 @@ bash deploy.sh                      # 查配置 -> 安装 -> 验收，最后一�
 
 **不想动手就把仓库整个交给你的 AI**，说：「读 `AGENTS.md`，照它部署」。它问你的只有 5 个问题，你要做的只有扫一次码。
 
+### 更新：也是一条命令
+
+```bash
+git pull && bash update.sh
+```
+
+`update.sh` 的原则是**只增不改**：
+
+| 步骤 | 行为 |
+|---|---|
+| 配置补键 | 只补新版本新增的配置项，**你改过的值一字不动** |
+| 日程补项 | 只添加新的 routine，不覆盖你改过的 prompt |
+| 插件 | 重装 fork 快照 + 重打本地补丁 |
+| 重启与自检 | 重启 dsh，跑 preflight 并报状态 |
+
+先看会改什么：`bash update.sh --dry-run`。幂等，失败修好再跑一次即可。
+
+> 为什么需要它：以前没有更新通道，升版只能重跑 `install.sh`，而它会用模板
+> **整体覆盖** `cordis.patch.yml` —— 你手调过的每一项都会没。`update.sh` 就是为这个写的。
+
 <details>
 <summary>目录</summary>
 
@@ -292,5 +312,5 @@ Python **3.8+**，零第三方依赖（`requirements.txt` 只有说明）。
 
 ## 版本与许可
 
-当前 `0.7.17`（见 `VERSION`），改动记录在 `CHANGELOG.md`。
+当前 `0.7.18`（见 `VERSION`），改动记录在 `CHANGELOG.md`。
 MIT，见 `LICENSE`；第三方出处与角色形象版权说明见 `NOTICE.md`。

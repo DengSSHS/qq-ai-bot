@@ -15,6 +15,23 @@ bash deploy.sh                       # 查配置 -> install.sh -> verify.sh，�
 # 失败就改 deploy.env 再跑一次，install.sh 可重入
 ```
 
+## 已装好的机器要更新（这是一条独立命令，不要让人类回去问作者）
+
+```bash
+git pull && bash update.sh
+```
+
+`update.sh` 的原则是**只增不改**：
+
+- 配置：只补新版本新增的键，**人类改过的值一字不动**；
+- 日程：只添加新的 routine，不覆盖已有 prompt；
+- 插件：重装 fork 快照 + 重打本地补丁；
+- 最后重启 dsh 并跑 preflight。
+
+`bash update.sh --dry-run` 可先看会改什么。它幂等，失败修好重跑即可。
+**绝对不要用重跑 `install.sh` 来“更新”** —— 它会用模板整体覆盖
+`cordis.patch.yml`，人类手调过的每一项都会没。
+
 `deploy.sh` 最后一行是结论：**`VERDICT: READY`** 才算装完。出现
 `NOT READY` 或任何 `[FAIL]` 都**不要**向人类汇报成功。
 

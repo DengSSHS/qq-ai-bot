@@ -225,6 +225,20 @@ else
 fi
 ok "脚本 $(ls "$DSH_HOME"/*.py 2>/dev/null | wc -l) 个、人设已就位"
 
+# 6.5 主动行为日程（routines.json）
+# 以前只存在于作者机器上，导致别人装完根本没有主动私聊/日记提醒/空间说说——
+# proactive.py 读到的是空列表，安安静静什么都不做。
+if [ ! -f "$DSH_HOME/routines.json" ]; then
+  if [ -f "$STACK/config/routines.json.tpl" ]; then
+    cp "$STACK/config/routines.json.tpl" "$DSH_HOME/routines.json"
+    ok "routines.json 已装（主动私聊/日记/空间）"
+  else
+    warn "没有 stack/config/routines.json.tpl，主动行为不会启用"
+  fi
+else
+  ok "routines.json 已存在，保持不动（用 update.sh 补新增的 routine）"
+fi
+
 # ── 7. 配置 ───────────────────────────────────────────────────────────
 phase "7/9 写配置"
 

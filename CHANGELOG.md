@@ -2,6 +2,29 @@
 
 本项目按「改了什么 + 为什么」记录，不按版本号堆功能。所有日期为实际改动日期。
 
+## v0.7.18 — 2026-10-25 · 更新通道：别人不再需要回来问你
+
+两个真实的洞：
+
+1. **没有 `update.sh`**。`install.sh` 用 `sed ... tpl > cordis.patch.yml` **整体覆盖**配置，
+   所以“升级”只能重跑 install，等于把手调过的每一项打回模板默认。
+2. **`routines.json` 从来没进安装流程**。全仓库只有模板，`install.sh` 里没有一行引用它——
+   别人装完 `proactive.py` 读到空列表，主动私聊/日记提醒/空间说说**全都不存在**。
+   （这才是“要回来问作者”的真正原因：不只是不知道怎么更新，是没装上。）
+
+新增 `update.sh`：git pull → 配置补键 → 日程补项 → 重装 fork/补丁 → 重启 → 自检。
+原则是**只增不改**：配置只补缺失的键、已有值一字不改；routines 只添加新 id，
+不覆盖已改的 prompt。幂等，支持 `--dry-run`。
+
+`install.sh` 新增：`routines.json` 不存在时从模板创建（存在则不动）。
+
+文档：README 加「更新：也是一条命令」；AGENTS.md 明确写「不要用重跑 install.sh 来更新」。
+
+自验：两个脚本 `bash -n` 通过；配置合并实测（删两键模拟旧版本）——新键补上、
+自定义值 `casualEngageRate: 0.2` 与 `newMessagePolicy: steer` 一字未改；preflight 71/0。
+
+未验：`update.sh` 完整流程没在干净机器上跑（第 4-6 步需真实服务器）。
+
 ## v0.7.17 — 2026-10-25 · 修 idle：概率模型的地基原来是坏的
 
 用户指出：`idle_minutes()` 依赖的 `qq-actions.log` 从未生成，idle 恒为无穷大，
