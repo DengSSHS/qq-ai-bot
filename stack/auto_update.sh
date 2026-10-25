@@ -183,6 +183,11 @@ fi
 
 FINAL_VER="$(cat VERSION 2>/dev/null || echo '?')"
 log "更新成功：$CUR_VER → $FINAL_VER"
-notify "已自动更新到 $FINAL_VER" \
-  "凌晨自动检查发现新版本并已更新：$CUR_VER → $FINAL_VER，自检通过。要关闭自动更新：python3 /opt/dsh/switches.py off auto_update"
+# 没登录时 QQ 通道发不出去、邮件也可能没配，别弹一堆失败信息吓人。
+if [ -n "$WARN_ONLY" ]; then
+  log "（未登录，跳过通知；扫码登录后下次更新会正常发）"
+else
+  notify "已自动更新到 $FINAL_VER" \
+    "凌晨自动检查发现新版本并已更新：$CUR_VER → $FINAL_VER，自检通过。要关闭自动更新：python3 /opt/dsh/switches.py off auto_update"
+fi
 exit 0
