@@ -2,6 +2,58 @@
 
 本项目按「改了什么 + 为什么」记录，不按版本号堆功能。所有日期为实际改动日期。
 
+## v0.9.1 — 2026-10-26 · 统一事件适配层（六条架构欠账的第 1 条）
+
+你列的六条我逐条核了代码，结论和动作：
+
+| # | 条目 | 核实结果 | 状态 |
+|---|---|---|---|
+| ① | 统一事件适配层 | 确实只有 message 走管线，notice 全丢 | ✅ 今天做完 |
+| ② | 统一发送收口 | QQ 出站**已经只有 bridge 一个**（Python 不发 QQ）；散的是限流/合并/审计/确认 | 🟡 写进计划 |
+| ③ | 上下文装配器 | 记忆部分已收口到 mem_layers，prompt.js 里仍散着 60 多行拼接 | 🟡 部分 |
+| ④ | 能力注册表 | panel_api 有 28 项，但没有风险分级/可用性校验 | 🟡 部分 |
+| ⑤ | 统一调度器 | 日记已改带外（v0.8.1），主动私聊/空间仍走 qq-inject | 🟡 方向对，形态未到 |
+| ⑥ | 备份与迁移 | `/opt/dsh` 下 113 个备份痕迹、53 个 `.bak-*` | ⬜ 未做 |
+
+### ① 落地内容
+
+新增 `lib/events.js`（统一适配层）：
+
+```js
+describeEvent(event) → {key, kind, feed, chatId, userId, note}
+toInboundEvent(event, desc) → 合成消息（仅 feed=true）
+countEvent(desc) → 每类事件的到达次数
+ROUTES = { 'message.*': feed, 'notice.notify.poke': feed, 'notice.group_recall': record, ... }
+```
+
+bridge 入口从「poke 专用钩子 + normalize 丢 notice」改成三句话：
+归一化 → 计数 → 喂或不喂。**以后加撤回/进群/戳一戳之外的新感知，只改 ROUTES 一行。**
+
+顺手删掉了 v0.9.0 里临时加的 `handlePokeNotice`（职责搬进适配层，避免两处逻辑漂移）。
+
+### 验证（注入 4 类事件）
+
+```
+notice.notify.poke       → 进管线：[拍一拍] 神神很衰 拍了拍你…
+notice.group_recall      → 事件只记录不下发：notice.group_recall
+notice.group_increase    → 事件只记录不下发：notice.group_increase
+notice.notify.emoji_like → 事件只记录不下发：notice.notify.emoji_like
+```
+
+### 顺手发现的一个隐患
+
+`vendor/fork-20261024` 是 10-24 的快照，**跑 `install_fork.sh` 会把之后所有改动覆盖掉**。
+已用当前 lib 重建 `fork-20261026`（29 个文件，含 events.js），`--check` 结果为一致
+（只剩 `.bak-*` 差异，这些不入快照）。
+
+### 六条的排序建议（写进 docs/architecture.md）
+
+1. ② 发送收口 —— 消除一整族 bug，现在只有一个出口，改起来最便宜
+2. ⑥ 备份清单 —— 成本最低、风险最高（丢数据不可逆）
+3. ③ 上下文装配 —— 缓存与规则冲突
+4. ④ 能力注册表 —— 配合面板
+5. ⑤ 调度器 —— 把主动私聊也搬出注入通道
+
 ## v0.9.0 — 2026-10-26 · 引用回复 / 表情回应 / 拍一拍（入站 + 出站）
 
 四件事，两件是补缺口，两件是新增能力。
