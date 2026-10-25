@@ -182,7 +182,32 @@ def main():
             bonus_per_h = float(r.get("idleBonusPerHour", 0.05))
             bonus_cap = float(r.get("idleBonusCap", 0.30))
             idle_bonus = min(bonus_cap, bonus_per_h * hours)
-            prob = min(cap, max(0.0, (base + idle_bonus) * mult))
+
+            # 按天稳定随机：有些晚上失眠，有些晚上睡得沉。
+            # 用日期哈希，所以同一个晚上跑多少次结果都一样（不会抖）。
+            ins_chance = float(r.get("insomniaChance", 0) or 0)
+            insomnia_note = ""
+            if ins_chance > 0:
+                dk = day + r["id"]
+                dh = int(hashlib.sha256(dk.encode()).hexdigest()[:8], 16) % 1000 / 1000.0
+                if dh < ins_chance:
+                    base *= float(r.get("insomniaMult", 3.0))
+                    insomnia_note = "｜今晚失眠夜(%.2f<%.2f)" % (dh, ins_chance)
+                else:
+                    base *= float(r.get("soundSleepMult", 0.2))
+                    insomnia_note = "｜今晚睡得沉(%.2f>=%.2f)" % (dh, ins_chance)
+
+            # 可选：乘性空闲加成（夜间用）。空闲只放大她本来就有的冲动，
+            # 而不是给"睡得沉"的夜晚垫一个下限。
+            mul_per_h = float(r.get("idleMulPerHour", 0) or 0)
+            if mul_per_h > 0:
+                mul_cap = float(r.get("idleMulCap", 2.0))
+                factor = 1.0 + min(mul_cap, mul_per_h * hours)
+                prob = min(cap, max(0.0, base * factor * mult))
+            else:
+                prob = min(cap, max(0.0, (base + idle_bonus) * mult))
+            if dry and insomnia_note:
+                print("[%s] %s" % (rid, insomnia_note.lstrip("｜")))
             hour_bucket = now.strftime("%Y-%m-%dT%H")
             h = int(hashlib.sha256((hour_bucket + rid).encode()).hexdigest()[:8], 16)
             roll = (h % 1000) / 1000.0
@@ -194,7 +219,10 @@ def main():
             if st["fired"].get(rid + "@" + hour_bucket):
                 continue
             # 主动私聊用自己的额度：固定型提醒（日记/空间）不该吃它的预算
-            dm_used = int(st.get("dmCount") or 0)
+            # 每条路线独立计数：白天和半夜各有各的额度，
+            # 否则白天发过之后，半夜那条会被"额度已用完"永久拦住。
+            ckey = "dmCount_" + rid
+            dm_used = int(st.get(ckey) or 0)
             dm_budget = int(r.get("dailyBudget") or cfg.get("dmDailyBudget") or budget)
             if dm_used >= dm_budget:
                 if dry:
@@ -206,7 +234,7 @@ def main():
             inject(r["prompt"])
             st["fired"][rid + "@" + hour_bucket] = now.isoformat()
             st["count"] += 1
-            st["dmCount"] = int(st.get("dmCount") or 0) + 1
+            st[ckey] = int(st.get(ckey) or 0) + 1
             log("fired %s at %s (idle=%.0fm prob=%.2f count=%d)"
                 % (rid, now.strftime("%H:%M"), idle, prob, st["count"]))
             continue

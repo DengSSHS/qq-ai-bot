@@ -72,13 +72,16 @@
       "ignoreQuiet": true,
       "minIdleMin": 0,
       "dailyBudget": 1,
-      "baseChance": 0.05,
-      "idleBonusPerHour": 0.0,
-      "idleBonusCap": 0.0,
+      "baseChance": 0.015,
       "rampPerHour": 0.05,
-      "rampCap": 0.12,
-      "prompt": "（半夜醒了）这个点你还醒着吗……鲸鲸睡不着，翻来覆去好久了。要是你也醒着，陪我说两句；要是你睡了，别回，我自己再躺会儿。",
-      "off": false
+      "rampCap": 0.35,
+      "prompt": "（半夜醒了）这个点你还醒着吗……鲸鲸睡不着，翻来覆去好久了。要是你也醒着，陪我说两句；要是今天一整天你都没来找我，那我更想问一句你在忙什么。你睡了就别回，我自己再躺会儿。",
+      "off": false,
+      "insomniaChance": 0.35,
+      "insomniaMult": 3.0,
+      "soundSleepMult": 0.2,
+      "idleMulPerHour": 0.15,
+      "idleMulCap": 2.0
     }
   ],
   "dmDailyBudget": 8
