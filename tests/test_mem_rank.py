@@ -80,5 +80,66 @@ class RetentionCurve(unittest.TestCase):
         self.assertLess(b["beta"], 2.0)
 
 
+class SideEffects(unittest.TestCase):
+    """rank() 不能改 hits；reinforce() 只能影响传入的条目。
+
+    背景（2026-10-25 用户指出）：旧版 rank() 对**所有参与排序的候选** hits+1，
+    于是“常被检索但从未真正被用上”的记忆也在被强化，且每次 rank 都全量写盘。
+    那是副作用，不是设计。
+    """
+
+    def setUp(self):
+        import tempfile
+        import shutil
+        self.tmp = tempfile.mkdtemp()
+        self._old = (mem_rank.DIARY, mem_rank.INDEX)
+        mem_rank.DIARY = self.tmp
+        mem_rank.INDEX = os.path.join(self.tmp, "index.json")
+
+    def tearDown(self):
+        import shutil
+        mem_rank.DIARY, mem_rank.INDEX = self._old
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _heads(self):
+        return list(mem_rank._load().keys())
+
+    def test_rank_does_not_touch_hits(self):
+        items = [("2026-10-01 10:00 一", "正文一"), ("2026-10-02 10:00 二", "正文二")]
+        mem_rank.rank(items)
+        mem_rank.rank(items)
+        mem_rank.rank(items)
+        store = mem_rank._load()
+        for h, _ in items:
+            self.assertEqual(int(store.get(h, {}).get("hits", 0)), 0,
+                             "rank() 不该改 hits（%s）" % h)
+
+    def test_rank_does_not_write_index(self):
+        import os as _os
+        mem_rank.rank([("2026-10-01 10:00 x", "body")])
+        self.assertFalse(_os.path.exists(mem_rank.INDEX),
+                         "rank() 是纯函数，不该创建/写入 index.json")
+
+    def test_reinforce_only_affects_passed_heads(self):
+        a = "2026-10-01 10:00 a"
+        b = "2026-10-02 10:00 b"
+        mem_rank.reinforce([a])
+        store = mem_rank._load()
+        self.assertEqual(int(store[a]["hits"]), 1)
+        self.assertNotIn(b, store, "没传进去的条目不该被创建/强化")
+
+    def test_reinforce_accumulates(self):
+        a = "2026-10-01 10:00 a"
+        mem_rank.reinforce([a])
+        mem_rank.reinforce([a])
+        self.assertEqual(int(mem_rank._load()[a]["hits"]), 2)
+
+    def test_rank_order_still_works(self):
+        old = "2020-01-01 10:00 旧"
+        new = "2026-10-24 10:00 新"
+        out = mem_rank.rank([(old, "旧正文"), (new, "新正文")])
+        self.assertEqual([h for h, _ in out][0], new, "更新的应该排前面")
+
+
 if __name__ == "__main__":
     unittest.main()

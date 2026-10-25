@@ -1,6 +1,15 @@
 # -*- coding: utf-8 -*-
-"""日记检索排序：移植仿生记忆模块 v1.1.4 的遗忘曲线（humanRetention）。
-不删除任何日记，只影响检索排序：重要、常被想起的往前排；久未提及的往后沉。"""
+"""日记检索排序：遗忘曲线排序（通用工程近似：指数衰减 + 长尾地板，
+借鉴记忆研究的公开结论；口径与 NOTICE.md 一致，不是某个具体项目的代码移植）。
+
+不删除任何日记，只影响检索排序：重要、常被想起的往前排；久未提及的往后沉。
+
+两个函数职责分开：
+    rank(items)       纯函数，只排序，不写盘（高频调用零 I/O）
+    reinforce(heads)  只对真正注入上下文的条目记一次复述（hits+1）
+为什么这么拆：旧版 rank() 会给所有参与排序的候选 hits+1，于是“常被检索但从未
+被真正用上”的记忆也在被强化，hits 无限膨胀又把半衰期拉长——那是副作用，不是设计。
+"""
 import json
 import math
 import os
@@ -11,7 +20,7 @@ from datetime import datetime
 DIARY = os.path.join(os.environ.get("MEMORY_DIR", "/opt/dsh/memory"), "diary")
 INDEX = os.path.join(DIARY, "index.json")
 
-# 参数取自 retention-model.js 的 episodic 档
+# 参数是通用工程取值（半衰期 60 天 / 地板 0.20 / 长尾指数 0.66），不是某项目参数
 BASE = {"halfLifeDays": 60.0, "floor": 0.20, "beta": 0.66}
 RECENCY_WEIGHT = 0.35
 
@@ -74,7 +83,10 @@ def note(head, importance=None):
 
 
 def rank(items):
-    """items: [(head, body)] -> 按遗忘曲线加权排序，同时记一次复述（hits+1）。"""
+    """items: [(head, body)] -> 按遗忘曲线加权排序。
+
+    纯函数：不修改 hits、不写盘。想记“被想起一次”请另外调 reinforce()。
+    """
     store = _load()
     now = time.time()
     scored = []
@@ -83,12 +95,28 @@ def rank(items):
         age = (now - float(e.get("created") or _created(head))) / 86400.0
         s = _retention(float(e.get("imp", 0.6)), int(e.get("hits", 0)), age)
         scored.append((s, head, body))
+    scored.sort(key=lambda x: (-x[0], x[1]))
+    return [(h, b) for _, h, b in scored]
+
+
+def reinforce(heads):
+    """只对真正被注入上下文的条目记一次复述（hits+1，落一次盘）。
+
+    为什么不能放在 rank() 里：那样所有候选都被强化，包括从未真正被用上的，
+    hits 无限膨胀 → 半衰期被 log1p(hits) 拉长 → 越常进候选池越忘不掉。
+    """
+    heads = [h for h in heads if h]
+    if not heads:
+        return 0
+    store = _load()
+    now = time.time()
+    for head in heads:
+        e = _meta(head, store)
         e["hits"] = int(e.get("hits", 0)) + 1
         e["last"] = now
         store[head] = e
     _save(store)
-    scored.sort(key=lambda x: (-x[0], x[1]))
-    return [(h, b) for _, h, b in scored]
+    return len(heads)
 
 
 def stats():

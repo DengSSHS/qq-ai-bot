@@ -113,6 +113,8 @@ def tool_diary_search(args):
             if picked:
                 try:
                     picked = mem_rank.rank(picked)
+                    # 这一支里 picked 全部会被返回、也就全部会用上 → 全部强化
+                    mem_rank.reinforce([h for h, _ in picked])
                 except Exception:
                     pass
                 glue = chr(10) + chr(10)
@@ -123,10 +125,14 @@ def tool_diary_search(args):
     if not hits:
         return "日记里没搜到「%s」。" % q
     try:
-        hits = mem_rank.rank(hits)
+        ranked = mem_rank.rank(hits)
+        # 只有前 n 条会被注入上下文，所以只强化它们（不是全部候选）
+        final = ranked[:max(1, min(n, 20))]
+        mem_rank.reinforce([h for h, _ in final])
     except Exception:
         log('mem_rank.rank failed: %s' % traceback.format_exc())
-    return "\n\n".join("### %s\n%s" % (h, b) for h, b in hits[:max(1, min(n, 20))])
+        final = hits[:max(1, min(n, 20))]
+    return "\n\n".join("### %s\n%s" % (h, b) for h, b in final)
 
 
 def tool_notes_read(args):
