@@ -156,6 +156,36 @@ else
   warn "没有 sync_scripts.py，跳过脚本同步"
 fi
 
+# 3.6 limits.json（每天限制）：只补缺失的键，不改已有值
+LIM="$DSH_HOME/limits.json"
+LIM_TPL="$PWD/stack/config/limits.json.tpl"
+if [ -f "$LIM_TPL" ]; then
+  if [ "$DRY" = "1" ]; then
+    [ -f "$LIM" ] || warn "limits.json 不存在（将按模板创建）"
+  else
+    "$PY" - "$LIM" "$LIM_TPL" <<'LIMPY'
+import io, json, os, sys
+lim_p, tpl_p = sys.argv[1], sys.argv[2]
+tpl = json.load(io.open(tpl_p, encoding="utf-8"))
+if os.path.exists(lim_p):
+    cur = json.load(io.open(lim_p, encoding="utf-8"))
+    added = [k for k in tpl if k not in cur]
+    for k in added:
+        cur[k] = tpl[k]
+    if added:
+        io.open(lim_p, "w", encoding="utf-8", newline="\n").write(
+            json.dumps(cur, ensure_ascii=False, indent=2) + "\n")
+        print("  limits.json 补了新键：" + ", ".join(added))
+    else:
+        print("  limits.json 无新键（你改的值保留）")
+else:
+    io.open(lim_p, "w", encoding="utf-8", newline="\n").write(
+        json.dumps(tpl, ensure_ascii=False, indent=2) + "\n")
+    print("  limits.json 已创建")
+LIMPY
+  fi
+fi
+
 # ── 4. 插件：重装 fork + 重打补丁 ─────────────────────────────────────
 say "4/6 插件与本地补丁"
 if [ -x "$PWD/stack/vendor/install_fork.sh" ]; then

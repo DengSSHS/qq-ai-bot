@@ -290,16 +290,88 @@ def cmd_set(fid, on):
     return 0 if ok else 1
 
 
+# ---------------------------------------------------------------- 限额（limits）
+LIMITS = "/opt/dsh/limits.json"
+
+LIMIT_DOC = [
+    ("qq_action_per_day", "全局发送次数/天", "撞上会表现为「她完全发不出消息」"),
+    ("qq_action_per_minute", "发送次数/分钟", "防刷屏"),
+    ("qq_rate_per_minute", "接收处理/分钟", "防消息洪峰"),
+    ("bili_share_per_day", "B站评论区 @ 主人/天", "超过就不 @ 了，只自己看"),
+    ("bili_share_interval_min", "两次 @ 最小间隔（分钟）", ""),
+    ("bili_share_same_video_days", "同视频多少天内不重复 @", ""),
+    ("dm_per_day", "主动私聊/天", "她主动找你说话的次数上限"),
+    ("dm_night_per_night", "半夜叫醒/晚", "失眠那条路线"),
+]
+
+
+def _load_limits():
+    d = {}
+    try:
+        with open(LIMITS, encoding="utf-8") as f:
+            d = json.load(f)
+    except Exception:
+        pass
+    return d
+
+
+def cmd_limits(as_json=False):
+    d = _load_limits()
+    if as_json:
+        print(json.dumps(d, ensure_ascii=False))
+        return 0
+    print("每天/每小时限制（改：python3 switches.py set-limit <名字> <值>）")
+    print("-" * 78)
+    print("%-28s %-10s %s" % ("名字", "当前值", "说明"))
+    print("-" * 78)
+    for k, label, note in LIMIT_DOC:
+        v = d.get(k, "?")
+        print("%-28s %-10s %s" % (label, v, note))
+    print("-" * 78)
+    print("文件：%s（改完立即生效，不用重启）" % LIMITS)
+    return 0
+
+
+def cmd_set_limit(name, value):
+    d = _load_limits()
+    known = {k for k, _, _ in LIMIT_DOC}
+    if name not in known:
+        print("没有这个限制项。可用的：%s" % ", ".join(sorted(known)))
+        return 2
+    try:
+        iv = int(value)
+    except Exception:
+        print("值要是整数")
+        return 2
+    if iv < 0:
+        print("不能是负数")
+        return 2
+    d[name] = iv
+    tmp = LIMITS + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(d, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, LIMITS)
+    print("[OK] %s = %d（已生效）" % (name, iv))
+    return 0
+
+
 def main():
     a = sys.argv[1:]
     if not a or a[0] in ("list", "ls", "status"):
         return cmd_list("--json" in a)
     if a[0] in ("on", "off") and len(a) >= 2:
         return cmd_set(a[1], a[0] == "on")
+    if a[0] in ("limits", "--limits", "-l"):
+        return cmd_limits("--json" in a)
+    if a[0] in ("set-limit", "set_limit") and len(a) >= 3:
+        return cmd_set_limit(a[1], a[2])
     if a[0] in ("-h", "--help", "help"):
         print(__doc__)
+        print("  python3 switches.py limits                 # 看所有每天限制")
+        print("  python3 switches.py set-limit <名字> <值>   # 改一个限制")
         return 0
-    print("用法：python3 switch.py [list | on <开关> | off <开关> | --json]")
+    print("用法：python3 switch.py [list | on <开关> | off <开关> | limits"
+          " | set-limit <名字> <值> | --json]")
     return 2
 
 

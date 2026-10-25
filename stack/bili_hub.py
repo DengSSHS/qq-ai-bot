@@ -115,6 +115,18 @@ def gate():
 
 
 # ---------------------------------------------------------------- 写：评论区 @
+def lim_cfg():
+    """每天限制从 limits.json 读，改配置就生效（2026-10-26）。"""
+    d = {"bili_share_per_day": 3, "bili_share_interval_min": 20,
+         "bili_share_same_video_days": 7}
+    try:
+        with open(os.path.join(BASE, "limits.json"), encoding="utf-8") as f:
+            d.update({k: v for k, v in json.load(f).items() if k in d})
+    except Exception:
+        pass
+    return d
+
+
 def limits():
     now = time.time()
     recs = []
@@ -131,11 +143,15 @@ def limits():
                 recs.append(r)
     except Exception:
         pass
+    cfg = lim_cfg()
+    daily_max = int(cfg["bili_share_per_day"])
+    gap_s = int(cfg["bili_share_interval_min"]) * 60
     today0 = time.mktime(time.localtime()[:3] + (0, 0, 0, 0, 0, -1))
     sent = [r for r in recs if r.get("ts", 0) >= today0]
     last = max([r.get("ts", 0) for r in recs], default=0)
-    return {"daily_max": 3, "sent_today": len(sent), "left_today": max(0, 3 - len(sent)),
-            "next_ok_in_s": max(0, int(last + 1200 - now)) if last else 0}
+    return {"daily_max": daily_max, "sent_today": len(sent),
+            "left_today": max(0, daily_max - len(sent)),
+            "next_ok_in_s": max(0, int(last + gap_s - now)) if last else 0}
 
 
 def share(args):
@@ -150,7 +166,7 @@ def share(args):
 
     lim = limits()
     if lim["left_today"] <= 0:
-        return {"ok": False, "error": {"code": "daily_limit", "message": "今天分享够 3 条了"}, "limits": lim}
+        return {"ok": False, "error": {"code": "daily_limit", "message": "今天分享额度用完了（见 limits.json）"}, "limits": lim}
     if lim["next_ok_in_s"] > 0:
         return {"ok": False, "error": {"code": "too_soon",
                                        "message": "刚分享过，%d 分钟后再来" % (lim["next_ok_in_s"] // 60)},

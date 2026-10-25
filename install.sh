@@ -282,6 +282,16 @@ else
   ok "routines.json 已存在，保持不动（用 update.sh 补新增的 routine）"
 fi
 
+# 6.6 每天/每小时限制（limits.json）
+# 以前这些值写死在代码里（比如 B 站评论区 @ 主人每天 3 条），改不了。
+# 现在抽成配置文件，改完立即生效。
+if [ ! -f "$DSH_HOME/limits.json" ] && [ -f "$STACK/config/limits.json.tpl" ]; then
+  cp "$STACK/config/limits.json.tpl" "$DSH_HOME/limits.json"
+  ok "limits.json 已装（每天限制可改：switches.py limits）"
+elif [ -f "$DSH_HOME/limits.json" ]; then
+  ok "limits.json 已存在，保持不动"
+fi
+
 # ── 7. 配置 ───────────────────────────────────────────────────────────
 phase "7/9 写配置"
 

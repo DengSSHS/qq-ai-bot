@@ -18,11 +18,33 @@ routines.json       改 JSON、认条目名
 ## 用法
 
 ```bash
-python3 switch.py                # 列出所有开关和当前状态
-python3 switch.py off casual_dm  # 关掉
-python3 switch.py on  casual_dm  # 打开
-python3 switch.py --json         # 给程序读
+python3 switches.py                # 列出所有开关和当前状态
+python3 switches.py off casual_dm  # 关掉
+python3 switches.py on  casual_dm  # 打开
+python3 switches.py --json         # 给程序读
+
+# 每天/每小时限制（另一类东西：不是开关，是数字）
+python3 switches.py limits                      # 一屏看全所有限制
+python3 switches.py set-limit bili_share_per_day 10   # 改一个，立即生效
 ```
+
+### 限制（limits.json）
+
+以前这些数字**写死在代码里**，改不了。典型后果：B 站评论区 @ 主人每天只能 3 条，
+一晚上就用完了，之后只能看着。（实测：10-24 一晚用了 5 次）
+
+现在全部收到 `/opt/dsh/limits.json`，改完立即生效、不用重启：
+
+| 名字 | 默认 | 含义 |
+|---|---|---|
+| `qq_action_per_day` | 2000 | 全局发送次数，安全阀（撞上会表现为“她完全发不出消息”） |
+| `qq_action_per_minute` | 20 | 每分钟发送 |
+| `qq_rate_per_minute` | 8 | 每分钟接收处理 |
+| `bili_share_per_day` | **10** | B 站评论区 @ 主人，每天几条 |
+| `bili_share_interval_min` | **8** | 两次 @ 之间至少隔多久 |
+| `bili_share_same_video_days` | 7 | 同一个视频几天内不重复 @ |
+| `dm_per_day` | 8 | 主动私聊每天上限 |
+| `dm_night_per_night` | 1 | 半夜叫醒每晚上限 |
 
 输出：
 
