@@ -548,6 +548,25 @@ try:
 except Exception as e:
     warn("能力注册表校验失败：%s" % e)
 
+# ---------------- 17. 上下文稳定性 ----------------
+sec("17. 上下文稳定性（缓存）")
+try:
+    rc, out, _err = sh("python3 /opt/dsh/ctx_hash.py", timeout=90)
+    lines = (out or "").split(chr(10))
+    head = [ln for ln in lines if ln.startswith("[OK  ]") or ln.startswith("[FAIL]") or ln.startswith("[WARN]")]
+    if not head:
+        warn("ctx_hash.py 没给出结论")
+    elif head[0].startswith("[OK"):
+        ok(head[0].replace("[OK  ] ", "").strip()[:110])
+    elif head[0].startswith("[FAIL"):
+        bad("稳定前缀跨轮不一致（前缀缓存必然 miss）")
+        for ln in head[:2]:
+            bad(ln.replace("[FAIL]", "").strip()[:110])
+    else:
+        warn(head[0].replace("[WARN]", "").strip()[:110])
+except Exception as e:
+    warn("上下文稳定性检查失败：%s" % e)
+
 # ---------------- 总结 ----------------
 print()
 print("=" * 62)
