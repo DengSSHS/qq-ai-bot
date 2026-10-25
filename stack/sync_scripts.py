@@ -76,7 +76,7 @@ def save_manifest(d):
     os.replace(tmp, MANIFEST)
 
 
-def notify_conflicts(conflicts):
+def notify_conflicts(conflicts, updated=None):
     """把冲突告诉使用者（同一次冲突只提醒一次，不重复刷屏）。"""
     if not conflicts:
         return
@@ -92,11 +92,16 @@ def notify_conflicts(conflicts):
     names = ", ".join(n for n, _ in conflicts[:6])
     more = "" if len(conflicts) <= 6 else " 等 %d 个" % len(conflicts)
     subject = "更新时发现 %d 个文件被你改过（未覆盖）" % len(conflicts)
+    land = ""
+    if updated:
+        land = ("\n其余 %d 个文件已经正常更新到新版（包含本次的 bug 修复）：\n  %s\n"
+                % (len(updated), ", ".join(updated[:10])))
     body = (
         "这些文件你（或使用者）改过，更新时保留了你的版本，没有覆盖：\n\n"
         + "\n".join("  - %s" % n for n, _ in conflicts[:12])
         + ("\n  …还有 %d 个" % (len(conflicts) - 12) if len(conflicts) > 12 else "")
-        + "\n\n新版本已经放在同目录的「文件名.new」里，你可以：\n"
+        + "\n" + land
+        + "\n新版本已经放在同目录的「文件名.new」里，你可以：\n"
         "  1. 什么都不做 —— 继续用自己的版本（下次更新还会这样提示，但只提醒一次）\n"
         "  2. 用新版 —— 把 .new 覆盖过去\n"
         "  3. 先看差异 —— diff -u 文件名 文件名.new\n\n"
@@ -142,6 +147,7 @@ def main():
 
     stats = {"新增": [], "更新": [], "保留本地改动": [], "已是最新": [], "无变化": []}
     conflicts = []
+    no_base = []
 
     for name in sorted(os.listdir(src_dir)):
         if not name.endswith(PATTERNS):
@@ -179,9 +185,9 @@ def main():
             if not check_only:
                 shutil.copy2(src, dst + ".new")
             new_manifest[name] = disk_hash
-            stats["保留本地改动"].append(name +
-                                       "（无基线，已保守处理；确认后可 --adopt）")
+            stats["保留本地改动"].append(name)
             conflicts.append((name, new_hash))
+            no_base.append(name)
         else:
             # 别人改过，且新版也不同 → 绝不覆盖
             if force:
@@ -211,10 +217,14 @@ def main():
         print("     想合并：diff -u %s %s.new" % (stats["保留本地改动"][0],
                                                  stats["保留本地改动"][0]))
         print("     想让当前内容成为新基线（以后按它比对）：--adopt")
+        if no_base:
+            print("     注：%s 没有历史基线（这版之前就存在），所以按保守策略处理；"
+                  % ", ".join(no_base))
+            print("     确认它们不是自己改过的话，可以跑 --adopt 把当前内容定为基线。")
 
     # 冲突要主动告诉使用者（同一次冲突只提醒一次，避免每次跑都刷屏）
     if conflicts and not check_only:
-        notify_conflicts(conflicts)
+        notify_conflicts(conflicts, stats["更新"] + stats["新增"])
 
     if not any(stats[k] for k in stats if k != "无变化"):
         print("脚本无需同步（%d 个文件已是仓库版本）" % len(stats["无变化"]) + str(len(stats["已是最新"])))
