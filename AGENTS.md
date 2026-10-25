@@ -57,6 +57,17 @@ git pull && bash update.sh
   **`{{占位符}}` 必须全部替换**（verify.sh 会检查残留和少于 20 行）
 - `custom` —— 人类给全文或文件路径，填 `PERSONA_FILE`
 
+## 文档地图
+
+| 想看什么 | 看哪个 |
+|---|---|
+| 一步步装、每步的预期输出、常见 FAIL | `docs/deploy-guide.md` |
+| 完整部署要求（权威） | `START-HERE.md` |
+| 没人会读的时候人工装 | `MANUAL.md` |
+| 第三方代码 / 致谢 / 对上游的改动 | `NOTICE.md` |
+| **与腾讯无关、账号风险、免责** | `DISCLAIMER.md`（**部署前必读**） |
+| 权限模型 / 暴露面 | `SECURITY.md` |
+
 ## 装完之后你会得到
 
 | 东西 | 位置 |
