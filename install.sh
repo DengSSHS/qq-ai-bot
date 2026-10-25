@@ -467,6 +467,19 @@ systemctl enable --now proactive.timer      >>"$LOG" 2>&1 || warn "proactive.tim
 systemctl enable --now body-state.timer     >>"$LOG" 2>&1 || warn "body-state.timer 启动失败"
 systemctl enable --now toolmode.path        >>"$LOG" 2>&1 || warn "toolmode.path 启动失败"
 
+# 这几个以前只在作者机器上，没进仓库 → 别人装完对应功能根本不跑。
+# 缺任何一个都是静默失效（看起来装好了，其实什么也没做）。
+for t in qqguard.timer memory-distill.timer sticker-settle.timer \
+         usage-report.timer patch-doctor.timer diary-noon.timer diary-midnight.timer; do
+  systemctl enable --now "$t" >>"$LOG" 2>&1 || warn "$t 启动失败"
+done
+ok "定时任务已装：掉线看护 / 记忆蒸馏 / 收图结算 / 日报 / 漂移检测 / 日记提醒"
+
+# 自动更新：每天凌晨 4 点检查仓库，有更新就升，坏了自动回滚。
+# 想关：python3 /opt/dsh/switches.py off auto_update
+systemctl enable --now auto-update.timer >>"$LOG" 2>&1 || warn "auto-update.timer 启动失败"
+ok "自动更新已开启（每天 04:00；关闭：switches.py off auto_update）"
+
 sleep 8
 systemctl is-active --quiet dsh-onebot && ok "dsh-onebot 运行中" || die "dsh-onebot 没起来：journalctl -u dsh-onebot -n 50"
 

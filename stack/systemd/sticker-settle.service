@@ -1,0 +1,11 @@
+[Unit]
+Description=Settle today's received images: judge whether to keep as stickers
+After=network-online.target
+
+[Service]
+EnvironmentFile=/opt/dsh/qwen.env
+Type=oneshot
+Environment=PYTHONPATH=/opt/dsh/lib
+ExecStart=/usr/bin/python3 /opt/dsh/stickerlib.py --settle
+StandardOutput=append:/var/log/sticker-settle.log
+StandardError=append:/var/log/sticker-settle.log

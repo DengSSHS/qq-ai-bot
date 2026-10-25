@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily auto-update: check repo, update if new, verify, rollback on failure
+After=network-online.target dsh-onebot.service
+
+[Service]
+Type=oneshot
+Environment=DSH_HOME=/opt/dsh
+ExecStart=/bin/bash /opt/dsh/auto_update.sh
+TimeoutStartSec=1800
+Nice=10

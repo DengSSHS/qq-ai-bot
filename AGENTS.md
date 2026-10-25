@@ -29,6 +29,11 @@ git pull && bash update.sh
 - 最后重启 dsh 并跑 preflight。
 
 `bash update.sh --dry-run` 可先看会改什么。它幂等，失败修好重跑即可。
+
+**也有全自动的**：`auto-update.timer` 每天 04:00 检查仓库，有新版就升级、
+升级后自检、失败自动回滚（`git reset --hard` 回旧 commit 后再跑一次 update.sh）。
+关闭：`python3 /opt/dsh/switches.py off auto_update`。前提是**用 git clone 部署的机器**。
+
 **绝对不要用重跑 `install.sh` 来“更新”** —— 它会用模板整体覆盖
 `cordis.patch.yml`，人类手调过的每一项都会没。
 

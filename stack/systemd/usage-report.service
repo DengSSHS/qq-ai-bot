@@ -1,0 +1,7 @@
+[Unit]
+Description=Append daily LLM usage summary
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/dsh
+ExecStart=/opt/dsh/usage_daily.sh
+Nice=19

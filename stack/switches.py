@@ -67,6 +67,9 @@ FEATURES = [
     dict(id="patch_doctor", kind="timer", label="插件补丁漂移检测",
          desc="每周检查上游插件改版后本地 fork 是否还兼容",
          unit="patch-doctor.timer"),
+    dict(id="auto_update", kind="timer", label="每日自动更新",
+         desc="每天 04:00 检查仓库有无新版本，有就升级；升级后自检，坏了自动回滚",
+         unit="auto-update.timer"),
     # ---- 安全与预算 ----
     dict(id="budget_breaker", kind="budget", label="预算熔断",
          desc="token 用量超限时自动降级/停机（默认关闭）",

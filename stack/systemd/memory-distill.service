@@ -1,0 +1,11 @@
+[Unit]
+Description=Distill long-term memory from QQ conversations
+After=network-online.target dsh-onebot.service
+
+[Service]
+EnvironmentFile=/opt/dsh/qwen.env
+Type=oneshot
+WorkingDirectory=/opt/dsh
+Environment=PYTHONPATH=/opt/dsh/lib
+ExecStart=/usr/bin/python3 /opt/dsh/memory_distill.py --apply
+Nice=10

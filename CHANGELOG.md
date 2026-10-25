@@ -2,6 +2,30 @@
 
 本项目按「改了什么 + 为什么」记录，不按版本号堆功能。所有日期为实际改动日期。
 
+## v0.7.19 — 2026-10-25 · 自动更新：每天凌晨 4 点自己检查
+
+新增 `auto-update.timer`（04:00 ±10min）：git fetch 比对 → 有新版就 `git pull` +
+`update.sh` → 自检（服务起没起 / QQ 在不在线）→ 失败就 `git reset --hard`
+回到旧 commit 再跑一次 update.sh，并通知主人。
+
+关闭渠道三种（均实测）：`switches.py off auto_update`（开关面板多了一项）、
+`systemctl disable --now auto-update.timer`、`touch memory/auto-update.disabled`。
+
+### 顺带补：11 个 systemd unit 之前根本不在仓库里
+
+仓库 `stack/systemd/` 只有 3 个 unit，而作者机器上有 11 个 timer——别人装完，
+掉线看护、记忆蒸馏、收图结算、日报、漂移检测、日记提醒、B 站时间窗、Tulpa 看护
+**全都不会跑**。已全部同步进仓库，`install.sh` 逐个 `enable --now`。
+
+同时补上两个被 unit 引用但仓库缺失的脚本：`tulpa_guard.py`、`usage_daily.sh`
+（preflight 当场就报出 `usage-report.service needs usage_daily.sh`）。
+
+自验：preflight 73/0（新增文件也纳入检查）；`auto-update.timer` 线上已装，NEXT 04:05；
+开关 off → 脚本跳过、on → enabled。
+
+**未验**：没跑过“发现更新→升级→自检”的完整闭环（服务器部署非 git 仓库，脚本会正确跳过）；
+回滚路径只在代码层面写了，没制造真实失败去跑。
+
 ## v0.7.18 — 2026-10-25 · 更新通道：别人不再需要回来问你
 
 两个真实的洞：

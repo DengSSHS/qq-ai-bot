@@ -1,0 +1,7 @@
+[Unit]
+Description=Daily usage summary at 23:55
+[Timer]
+OnCalendar=*-*-* 23:55:00
+Persistent=true
+[Install]
+WantedBy=timers.target

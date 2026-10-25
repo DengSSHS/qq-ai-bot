@@ -1,0 +1,11 @@
+[Unit]
+Description=Diary reminder at 00:00
+
+[Timer]
+OnCalendar=*-*-* 00:00:00 Asia/Shanghai
+Persistent=false
+AccuracySec=30s
+Unit=diary-inject@midnight.service
+
+[Install]
+WantedBy=timers.target

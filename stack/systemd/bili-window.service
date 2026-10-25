@@ -1,0 +1,7 @@
+[Unit]
+Description=Bilibili browse window: enable/disable Tulpa MCP by schedule
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/dsh
+ExecStart=/usr/bin/python3 /opt/dsh/bili_window.py --apply
+Nice=15

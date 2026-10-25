@@ -1,0 +1,8 @@
+[Unit]
+Description=Check QQ link every 2 minutes
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+AccuracySec=20s
+[Install]
+WantedBy=timers.target

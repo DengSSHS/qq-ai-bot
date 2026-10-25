@@ -1,0 +1,7 @@
+[Unit]
+Description=QQ onebot link guard: auto-restart on kick, report on recovery
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/dsh
+ExecStart=/usr/bin/python3 /opt/dsh/qqguard.py
+Nice=10

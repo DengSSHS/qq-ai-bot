@@ -1,0 +1,7 @@
+[Unit]
+Description=Tulpa MCP health check (detect alive-but-hung)
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/dsh
+ExecStart=/usr/bin/python3 /opt/dsh/tulpa_guard.py
+Nice=15

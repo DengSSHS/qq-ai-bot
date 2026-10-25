@@ -1,0 +1,7 @@
+[Unit]
+Description=Verify local plugin patches still apply to upstream latest
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/dsh
+ExecStart=/usr/bin/python3 /opt/dsh/patch_doctor.py --mail
+Nice=15

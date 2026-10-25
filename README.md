@@ -42,6 +42,15 @@ git pull && bash update.sh
 
 先看会改什么：`bash update.sh --dry-run`。幂等，失败修好再跑一次即可。
 
+**也可以让它自己更新**：装好后每天 **04:00** 自动检查仓库，有新版就升级，
+升级后自检，失败自动回滚并通知你。想关：
+
+```bash
+python3 /opt/dsh/switches.py off auto_update
+```
+
+细节看 `docs/auto-update.md`。
+
 > 为什么需要它：以前没有更新通道，升版只能重跑 `install.sh`，而它会用模板
 > **整体覆盖** `cordis.patch.yml` —— 你手调过的每一项都会没。`update.sh` 就是为这个写的。
 
@@ -312,5 +321,5 @@ Python **3.8+**，零第三方依赖（`requirements.txt` 只有说明）。
 
 ## 版本与许可
 
-当前 `0.7.18`（见 `VERSION`），改动记录在 `CHANGELOG.md`。
+当前 `0.7.19`（见 `VERSION`），改动记录在 `CHANGELOG.md`。
 MIT，见 `LICENSE`；第三方出处与角色形象版权说明见 `NOTICE.md`。

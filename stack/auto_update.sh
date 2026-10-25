@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+# 每天凌晨自动检查仓库更新，有就更新，更新完自检；坏了自动回滚。
+#
+#   bash auto_update.sh              # 正常跑（systemd 定时器用它）
+#   bash auto_update.sh --force      # 不管有没有新提交都跑一遍 update.sh
+#   bash auto_update.sh --check      # 只检查有没有更新，不动
+#
+# 关闭方式（三种都行）：
+#   python3 /opt/dsh/switches.py off auto_update
+#   systemctl disable --now auto-update.timer
+#   touch /opt/dsh/memory/auto-update.disabled
+set -uo pipefail
+
+BASE="${DSH_HOME:-/opt/dsh}"
+LOG="$BASE/memory/auto-update.log"
+STATE="$BASE/memory/auto-update-state.json"
+FLAG="$BASE/memory/auto-update.disabled"
+PY="$(command -v python3 || command -v python || true)"
+
+MODE="run"
+case "${1:-}" in
+  --force) MODE="force" ;;
+  --check) MODE="check" ;;
+esac
+
+mkdir -p "$(dirname "$LOG")"
+log() { printf '%s %s\n' "$(date '+%F %T')" "$*" >> "$LOG"; printf '%s\n' "$*"; }
+notify() { [ -n "$PY" ] && "$PY" "$BASE/notify.py" "$1" "$2" 2>/dev/null || true; }
+
+# ── 找仓库：有 .git 且含 update.sh 的目录 ──────────────────────────────
+find_repo() {
+  if [ -n "${REPO_DIR:-}" ] && [ -d "$REPO_DIR/.git" ]; then echo "$REPO_DIR"; return; fi
+  for d in "$BASE/repo" "/opt/qq-ai-bot" "/root/qq-ai-bot" "/opt/qqbot/repo" "$BASE"; do
+    if [ -d "$d/.git" ] && [ -f "$d/update.sh" ]; then echo "$d"; return; fi
+  done
+  echo ""
+}
+
+# ── 开关检查 ───────────────────────────────────────────────────────────
+if [ "$MODE" != "check" ]; then
+  if [ -f "$FLAG" ]; then
+    log "跳过：存在 $FLAG（自动更新被手动停用）"
+    exit 0
+  fi
+  if [ -n "$PY" ] && [ -f "$BASE/switches.py" ]; then
+    if "$PY" "$BASE/switches.py" 2>/dev/null | grep -q '^auto_update *关'; then
+      log "跳过：switches.py 里 auto_update = 关"
+      exit 0
+    fi
+  fi
+fi
+
+REPO="$(find_repo)"
+if [ -z "$REPO" ]; then
+  log "跳过：找不到 git 仓库（tarball 部署的机器没有自更新能力，请用 update.sh 手动更新）"
+  exit 0
+fi
+cd "$REPO" || exit 1
+
+CUR_COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo '?')"
+CUR_VER="$(cat VERSION 2>/dev/null || echo '?')"
+
+# ── 查更新 ─────────────────────────────────────────────────────────────
+if ! git fetch --quiet origin 2>>"$LOG"; then
+  log "检查失败：git fetch 没成功（网络问题？），保持现状"
+  exit 0
+fi
+
+BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
+BEHIND="$(git rev-list --count "HEAD..origin/$BRANCH" 2>/dev/null || echo 0)"
+
+if [ "$BEHIND" = "0" ] && [ "$MODE" != "force" ]; then
+  log "无更新（当前 $CUR_VER / $CUR_COMMIT）"
+  exit 0
+fi
+
+NEW_VER="$(git show "origin/$BRANCH:VERSION" 2>/dev/null || echo '?')"
+log "发现 $BEHIND 个新提交：$CUR_VER($CUR_COMMIT) → $NEW_VER"
+
+if [ "$MODE" = "check" ]; then
+  log "check 模式，到此为止（要真更新请直接运行 bash auto_update.sh）"
+  exit 0
+fi
+
+# ── 记录回滚点 ─────────────────────────────────────────────────────────
+printf '{"from_commit":"%s","from_version":"%s","at":"%s"}\n' \
+  "$CUR_COMMIT" "$CUR_VER" "$(date -Is)" > "$STATE"
+
+# ── 更新 ───────────────────────────────────────────────────────────────
+if ! git pull --ff-only --quiet 2>>"$LOG"; then
+  log "失败：git pull 没能快进（本地有改动？），放弃本次更新"
+  exit 1
+fi
+NEW_COMMIT="$(git rev-parse --short HEAD)"
+log "代码已更新：$NEW_COMMIT / $(cat VERSION 2>/dev/null || echo '?')"
+
+if ! bash update.sh >> "$LOG" 2>&1; then
+  log "update.sh 返回非零，回滚到 $CUR_COMMIT"
+  git reset --hard "$CUR_COMMIT" >> "$LOG" 2>&1
+  bash update.sh >> "$LOG" 2>&1 || log "回滚后 update.sh 仍失败，需人工介入"
+  notify "自动更新失败并已回滚" "更新到 $NEW_COMMIT 时失败，已回滚到 $CUR_COMMIT（$CUR_VER）。详见 $LOG"
+  exit 1
+fi
+
+# ── 更新后自检 ─────────────────────────────────────────────────────────
+sleep 5
+FAILED=""
+systemctl is-active --quiet dsh-onebot || FAILED="dsh-onebot 没起来"
+if [ -z "$FAILED" ] && [ -n "$PY" ] && [ -f "$BASE/qqguard.py" ]; then
+  out="$("$PY" "$BASE/qqguard.py" --status 2>/dev/null | head -1)"
+  case "$out" in
+    *断开*) FAILED="QQ 未连接（$out）" ;;
+  esac
+fi
+
+if [ -n "$FAILED" ]; then
+  log "自检失败：$FAILED —— 回滚"
+  git reset --hard "$CUR_COMMIT" >> "$LOG" 2>&1
+  bash update.sh >> "$LOG" 2>&1 || log "回滚后 update.sh 仍失败"
+  notify "自动更新后自检失败，已回滚" "$FAILED。已回滚到 $CUR_VER($CUR_COMMIT)。详见 $LOG"
+  exit 1
+fi
+
+FINAL_VER="$(cat VERSION 2>/dev/null || echo '?')"
+log "更新成功：$CUR_VER → $FINAL_VER"
+notify "已自动更新到 $FINAL_VER" \
+  "凌晨自动检查发现新版本并已更新：$CUR_VER → $FINAL_VER，自检通过。要关闭自动更新：python3 /opt/dsh/switches.py off auto_update"
+exit 0

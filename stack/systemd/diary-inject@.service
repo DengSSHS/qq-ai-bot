@@ -1,0 +1,6 @@
+[Unit]
+Description=Inject a diary reminder into the QQ bot (noon / midnight)
+
+[Service]
+Type=oneshot
+ExecStart=/opt/dsh/inject_diary.sh %i
