@@ -95,6 +95,10 @@ CAPS = [
     # ---- 发送治理 ----
     dict(id="send.audit", kind="read", risk="low", mode="chat", default=True,
          file="send-audit.js", marker="installSendAudit", note="真实 message_id 才算发出"),
+    dict(id="send.outbox", kind="write", risk="medium", mode="chat", default=True,
+         file="outbox.js", marker="startOutbox", note="Python 侧走同一道闸门"),
+    dict(id="scheduler.intent", kind="write", risk="medium", mode="chat", default=True,
+         file="scheduler.py", marker="def decide", note="只产出意图，不直接变成用户消息"),
     dict(id="events.adapter", kind="read", risk="low", mode="chat", default=True,
          file="events.js", marker="describeEvent", note="notice 不再被丢"),
 ]

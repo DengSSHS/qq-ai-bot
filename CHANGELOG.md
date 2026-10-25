@@ -2,6 +2,54 @@
 
 本项目按「改了什么 + 为什么」记录，不按版本号堆功能。所有日期为实际改动日期。
 
+## v0.9.7 — 2026-10-26 · 统一调度器（第 5 条，最后一条）
+
+六条里的最后一条：**触发不再走聊天通道。**
+
+### 形状
+
+```
+scheduler.py（scheduler.timer，每 10 分钟）
+  ├─ decide()  时间窗 / 配额 / 空闲 → memory/intents.jsonl {kind, reason, hint, state:new}
+  └─ run()     chat.initiate → 生成一句话 → qq-outbox.jsonl
+                diary.write   → diary_outband.py
+                qzone.post    → 空间脚本
+
+qq-outbox.jsonl → bridge.startOutbox() → guardedConnectionCall
+                → qq-outbox.result.jsonl（含真实 message_id）
+```
+
+三条约束落地：
+1. **意图不变成用户消息**（走 outbox，不再塞 qq-inject）
+2. **Python 也过闸门**（限流 / dry-run / 气泡分合 / 审计 / 真实 id）
+3. **失败可重试**（发送失败回退读位 + 60 秒退避）
+
+`proactive.timer` 已停用，`scheduler.timer` 接管（首跑 `Result=success`）。
+
+### 验证到哪一步
+
+- ✅ 意图产出：`（dry）force → 唔…主人，鲸鲸刚睡醒，尾巴还有点软软的没力气呢。`
+- ✅ outbox → 闸门：注入 dry 窗口后推一条，结果 `{"ok":true,"message_id":-1,"intercepted":true}`
+- ⬜ 真实发送：**卡在 QQ 掉登录**（07:11 之后 `账号已离线`，NapCat 等扫码），登录恢复后验证
+
+### 踩的坑（两个都是"静默失效"）
+
+1. **TDZ**：`startOutbox` 接在 `const bridge` 之前 → `ReferenceError: Cannot access 'bridge' before initialization`。
+   插件**整块没激活**，而 `systemctl is-active` 还是 active —— 今晚第二次栽在这类"看状态正常、实际没工作"。
+2. **启动即消费**：WS 未连上就把队列读走 → 消息丢失。改成失败回退读位 + 退避，否则掉线时每 2 秒刷日志。
+
+### 顺手修掉的过期期望（第 4 次）
+
+checkall 还在检查 `proactive.timer` 是否自启，而我们故意停用了它 → 体检报 FAIL。
+已改到 `scheduler.timer` + `diary-outband.timer`。
+
+这个模式重复太多次了：**改行为就必须同步改期望，否则检查脚本会开始说谎**。
+以后改开关/定时器/默认值时，把 checkall 当同一提交的一部分。
+
+### 六条进度
+
+① ✅ ② ✅ ③ ✅ ④ ✅ ⑤ ✅（真机发送待登录） ⑥ ✅
+
 ## v0.9.6 — 2026-10-26 · 上下文装配：规则优先级一处定义 + 前缀稳定性可测
 
 第 3 条。先说我查出来的事实：**"缓存命中率 24%" 不是时间戳造成的**。

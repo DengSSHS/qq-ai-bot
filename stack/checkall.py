@@ -94,7 +94,7 @@ sec("1. 服务与进程")
 for name in ("dsh-onebot", "docker", "ttyd"):
     rc, out, _ = sh("systemctl is-active %s" % name)
     (ok if out == "active" else bad)("%s: %s" % (name, out))
-for name in ("dsh-onebot", "ttyd", "proactive.timer", "body-state.timer"):
+for name in ("dsh-onebot", "ttyd", "scheduler.timer", "body-state.timer", "diary-outband.timer"):
     rc, out, _ = sh("systemctl is-enabled %s" % name)
     (ok if out == "enabled" else bad)("%s 开机自启: %s" % (name, out))
 rc, out, _ = sh("docker ps --format '{{.Names}}' | grep -x napcat")
@@ -527,7 +527,7 @@ try:
         if c["fake"]:
             bad("假成功：send_* 没拿到真实 message_id（看 %s）" % AUDIT)
         if c["fail"]:
-            warn("发送失败 %d 条（多数是重启瞬间的 transport stopped）" % c["fail"])
+            warn("发送失败 %d 条（重启瞬间的 transport stopped，或掉线期间）" % c["fail"])
 except Exception as e:
     warn("读不到发送审计：%s" % e)
 
