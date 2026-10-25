@@ -70,6 +70,38 @@ def status():
     data = st.get("data") or {}
     online = bool(data.get("online"))
     out = {"online": online, "good": bool(data.get("good")), "raw": st.get("message", "")}
+
+    # 假在线识别：get_status 说在线，但最近的发送被 QQ 客户端拒绝
+    # （被风控踢下线后就是这个症状：retcode 1200 / 1006514「网络连接异常」）
+    try:
+        import json as _j
+        import time as _t
+        audit = os.path.join(BASE, "media", "onebot", "send_audit.jsonl")
+        recent_fail = 0
+        recent_ok = 0
+        now = _t.time()
+        for line in io.open(audit, encoding="utf-8"):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = _j.loads(line)
+            except Exception:
+                continue
+            if now - float(row.get("ts") or 0) > 900:
+                continue
+            if row.get("ok"):
+                recent_ok += 1
+            elif "EventChecker" in str(row.get("error", "")) or "1006514" in str(row.get("error", "")):
+                recent_fail += 1
+        out["recent_ok"] = recent_ok
+        out["recent_fail"] = recent_fail
+        if online and recent_fail > 0 and recent_ok == 0:
+            out["online"] = False
+            out["stale"] = True
+            out["reason"] = "接口说在线，但最近发送全部被拒（retcode 1200/1006514）——已被风控踢下线"
+    except Exception:
+        pass
     if not online:
         r = subprocess.run(
             "docker logs --since 30m napcat 2>&1 | grep -a -c '请扫描\\|账号已离线\\|风险'",
