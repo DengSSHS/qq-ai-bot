@@ -60,6 +60,10 @@ ROUTINES = os.path.join(BASE, "routines.json")
 BILI_WIN = os.path.join(BASE, "bili_window.conf.json")
 BILI_BUDGET = os.path.join(BASE, "bili-budget.json")
 SWITCHES = os.path.join(BASE, "switches.py")
+PERSONA = os.path.join(BASE, "media/onebot/persona.md")
+NOTES = os.path.join(BASE, "notes.md")
+DIARY_DIR = os.path.join(BASE, "memory/diary")
+DSH_LOG = "/var/log/dsh-onebot.log"
 
 
 # ---------------------------------------------------------------- 存储层
@@ -299,10 +303,18 @@ def write_item(item, value):
     return False, "未知存储类型 %s" % st
 
 
+def current(item):
+    """当前值：开关/文本/操作三类自带 value；其余从存储读。"""
+    st = item.get("storage")
+    if st in ("switches", "") or item.get("type") in ("text", "action"):
+        return item.get("value")
+    return read_item(item)
+
+
 def describe(item):
     d = dict(item)
     d.pop("key", None)
-    d["value"] = read_item(item)
+    d["value"] = current(item)
     if d["type"] == "percent" and d.get("unit") == "%":
         pass  # 面板自己乘 100 显示
     return d
@@ -339,23 +351,241 @@ def validate(item, raw):
     return v, "ok"
 
 
+# ---------------------------------------------------------------- ② 开关
+def _switches_json():
+    """读 switches.py 的 11 个开关（复用已有实现，不重复维护）。"""
+    try:
+        r = subprocess.run([sys.executable, SWITCHES, "list", "--json"],
+                           capture_output=True, text=True, timeout=60)
+        return json.loads(r.stdout or "[]")
+    except Exception:
+        return []
+
+
+def switch_items():
+    out = []
+    for sw in _switches_json():
+        out.append(dict(
+            id="sw:" + str(sw.get("id")),
+            group="开关",
+            label=sw.get("label") or sw.get("id"),
+            type="bool",
+            value=(sw.get("state") == "开"),
+            default=None,
+            desc=sw.get("desc") or "",
+            restart=False,
+            storage="switches",
+        ))
+    return out
+
+
+def switch_set(sid, on):
+    """改开关：委托给 switches.py，避免两套实现跑偏。"""
+    r = subprocess.run([sys.executable, SWITCHES, "on" if on else "off", sid],
+                       capture_output=True, text=True, timeout=90)
+    out = (r.stdout or "") + (r.stderr or "")
+    return r.returncode == 0, out.strip()[:200]
+
+
+# ---------------------------------------------------------------- ③ 文本
+TEXT_ITEMS = [
+    ("text_persona", "文本", "人设", PERSONA, "她是谁、怎么说话、边界在哪（改完要重启）", True),
+    ("text_notes", "文本", "长期笔记", NOTES, "主人是谁、常混的群、反复出现的梗（每轮注入）", False),
+]
+
+
+def read_text(path):
+    try:
+        with io.open(path, encoding="utf-8") as f:
+            return f.read()
+    except Exception:
+        return ""
+
+
+def text_items():
+    out = []
+    for tid, group, label, path, desc, restart in TEXT_ITEMS:
+        body = read_text(path)
+        out.append(dict(
+            id=tid, group=group, label=label, type="text",
+            value={"path": path, "chars": len(body), "lines": body.count("\n") + 1 if body else 0},
+            default=None, desc=desc, restart=restart, storage=os.path.basename(path),
+        ))
+    return out
+
+
+def cmd_text_get(tid):
+    for t, group, label, path, desc, restart in TEXT_ITEMS:
+        if t == tid:
+            print(json.dumps({"ok": True, "id": tid, "path": path,
+                              "text": read_text(path), "restart": restart},
+                             ensure_ascii=False))
+            return 0
+    print(json.dumps({"ok": False, "error": "没有这个文本 id：%s" % tid}, ensure_ascii=False))
+    return 2
+
+
+def cmd_text_set(tid, new_text):
+    """写回整段文本：原子写 + 备份。面板应该用 textarea 提交全文。"""
+    for t, group, label, path, desc, restart in TEXT_ITEMS:
+        if t != tid:
+            continue
+        if not new_text.strip():
+            print(json.dumps({"ok": False, "error": "不能写空（会把文件清掉）"},
+                             ensure_ascii=False))
+            return 2
+        try:
+            if os.path.exists(path):
+                shutil.copy2(path, path + ".bak-panel")
+            tmp = path + ".tmp"
+            with io.open(tmp, "w", encoding="utf-8", newline="\n") as f:
+                f.write(new_text)
+            os.replace(tmp, path)
+        except Exception as e:
+            print(json.dumps({"ok": False, "error": str(e)[:160]}, ensure_ascii=False))
+            return 1
+        print(json.dumps({"ok": True, "id": tid, "chars": len(new_text),
+                          "need_restart": restart,
+                          "message": "已写入，需要重启 dsh-onebot" if restart else "已写入"},
+                         ensure_ascii=False))
+        return 0
+    print(json.dumps({"ok": False, "error": "没有这个文本 id：%s" % tid}, ensure_ascii=False))
+    return 2
+
+
+# ---------------------------------------------------------------- ④ 操作
+ACTIONS = [
+    ("status", "服务状态", "dsh-onebot / llm-shim / QQ 连接"),
+    ("restart", "重启 dsh-onebot", "让 restart=true 的项生效"),
+    ("logs", "看日志尾部", "参数 n（行数，默认 40）"),
+    ("diary_list", "日记列表", "有哪些日、各多少条"),
+    ("diary_read", "读日记", "参数 n（条数，默认 5）"),
+    ("stickers_count", "表情库统计", "多少张、用过多少"),
+]
+
+
+def action_items():
+    return [dict(id="act:" + a, group="操作", label=lab, type="action",
+                 value=None, default=None, desc=desc, restart=False, storage="")
+            for a, lab, desc in ACTIONS]
+
+
+def cmd_call(action, args):
+    if action == "status":
+        def act(cmd):
+            try:
+                r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                return (r.stdout or "").strip()[:400]
+            except Exception as e:
+                return "err: %s" % e
+        print(json.dumps({
+            "ok": True,
+            "dsh-onebot": act(["systemctl", "is-active", "dsh-onebot"]),
+            "llm-shim": act(["systemctl", "is-active", "llm-shim"]),
+            "qq": act([sys.executable, os.path.join(BASE, "qqguard.py"), "--status"]),
+        }, ensure_ascii=False))
+        return 0
+
+    if action == "restart":
+        return cmd_restart()
+
+    if action == "logs":
+        n = int(args[0]) if args and str(args[0]).isdigit() else 40
+        try:
+            with open(DSH_LOG, "rb") as f:
+                f.seek(0, os.SEEK_END)
+                size = f.tell()
+                f.seek(max(0, size - 60000))
+                tail = f.read().decode("utf-8", "replace").splitlines()[-n:]
+        except Exception as e:
+            tail = ["读不到 %s：%s" % (DSH_LOG, e)]
+        print(json.dumps({"ok": True, "lines": tail}, ensure_ascii=False))
+        return 0
+
+    if action == "diary_list":
+        out = []
+        try:
+            for name in sorted(os.listdir(DIARY_DIR)):
+                if not name.endswith(".md"):
+                    continue
+                p = os.path.join(DIARY_DIR, name)
+                with io.open(p, encoding="utf-8") as f:
+                    body = f.read()
+                out.append({"file": name, "entries": body.count("### "),
+                            "chars": len(body)})
+        except Exception as e:
+            print(json.dumps({"ok": False, "error": str(e)[:160]}, ensure_ascii=False))
+            return 1
+        print(json.dumps({"ok": True, "files": out}, ensure_ascii=False))
+        return 0
+
+    if action == "diary_read":
+        n = int(args[0]) if args and str(args[0]).isdigit() else 5
+        try:
+            files = sorted(f for f in os.listdir(DIARY_DIR) if f.endswith(".md"))
+            path = os.path.join(DIARY_DIR, files[-1])
+            with io.open(path, encoding="utf-8") as f:
+                body = f.read()
+            chunks = [c for c in body.split("### ") if c.strip()]
+            picked = chunks[-n:]
+            print(json.dumps({"ok": True, "file": files[-1],
+                              "entries": ["### " + c.strip() for c in picked]},
+                             ensure_ascii=False))
+            return 0
+        except Exception as e:
+            print(json.dumps({"ok": False, "error": str(e)[:160]}, ensure_ascii=False))
+            return 1
+
+    if action == "stickers_count":
+        try:
+            r = subprocess.run([sys.executable, os.path.join(BASE, "stickerlib.py")],
+                               input=json.dumps({"jsonrpc": "2.0", "id": 1,
+                                                 "method": "tools/call",
+                                                 "params": {"name": "sticker_stats",
+                                                            "arguments": {}}}),
+                               capture_output=True, text=True, timeout=60)
+            txt = ""
+            for line in (r.stdout or "").splitlines():
+                if not line.strip().startswith("{"):
+                    continue
+                d = json.loads(line)
+                if d.get("id") == 1:
+                    for c in (d.get("result") or {}).get("content") or []:
+                        txt += c.get("text") or ""
+            print(json.dumps({"ok": True, "stats": txt[:400]}, ensure_ascii=False))
+            return 0
+        except Exception as e:
+            print(json.dumps({"ok": False, "error": str(e)[:160]}, ensure_ascii=False))
+            return 1
+
+    print(json.dumps({"ok": False, "error": "没有这个操作：%s" % action,
+                      "available": [a for a, _, _ in ACTIONS]}, ensure_ascii=False))
+    return 2
+
+
 # ---------------------------------------------------------------- 命令
 def cmd_list(as_json):
+    all_items = [describe(i) for i in TUNABLES] + switch_items() \
+        + text_items() + action_items()
     if as_json:
-        print(json.dumps({"items": [describe(i) for i in TUNABLES]},
-                         ensure_ascii=False, indent=1))
+        print(json.dumps({"items": all_items}, ensure_ascii=False, indent=1))
         return 0
     groups = {}
-    for i in TUNABLES:
+    for i in TUNABLES + switch_items() + text_items() + action_items():
         groups.setdefault(i["group"], []).append(i)
     for g, items in groups.items():
         print("\n== %s ==" % g)
         for i in items:
-            v = read_item(i)
+            v = current(i)
             if i["type"] == "percent" and i.get("unit") == "%":
                 shown = "%.0f%%" % (float(v) * 100) if isinstance(v, (int, float)) else str(v)
             elif i["type"] == "bool":
                 shown = "开" if v else "关"
+            elif i["type"] == "text":
+                v = v or {}
+                shown = "%s 行" % v.get("lines", "?")
+            elif i["type"] == "action":
+                shown = "（命令）"
             elif i["type"] == "schedule":
                 try:
                     shown = "%s-%s" % (v[0][0], v[0][1])
@@ -410,13 +640,45 @@ def main():
     a = sys.argv[1:]
     if not a or a[0] in ("list", "ls"):
         return cmd_list("--json" in a)
+
     if a[0] == "get" and len(a) >= 2:
-        return cmd_get(a[1])
+        tid = a[1]
+        if tid.startswith("text_"):
+            return cmd_text_get(tid)
+        if tid.startswith("sw:") or tid.startswith("act:"):
+            print(json.dumps({"ok": False,
+                              "error": "开关用 set <id> on|off；操作用 call <名字>"},
+                             ensure_ascii=False))
+            return 2
+        return cmd_get(tid)
+
     if a[0] == "set" and len(a) >= 3:
-        return cmd_set(a[1], " ".join(a[2:]))
+        tid, raw = a[1], " ".join(a[2:])
+        # 开关：set sw:xxx on|off
+        if tid.startswith("sw:"):
+            on = str(raw).strip().lower() in ("1", "true", "on", "开", "yes")
+            ok, msg = switch_set(tid[3:], on)
+            print(json.dumps({"ok": ok, "id": tid, "value": on,
+                              "need_restart": False,
+                              "message": msg if ok else msg}, ensure_ascii=False))
+            return 0 if ok else 1
+        # 文本：set text_xxx 走 stdin（避免超长命令行）
+        if tid.startswith("text_"):
+            body = sys.stdin.read() if not sys.stdin.isatty() else raw
+            return cmd_text_set(tid, body)
+        return cmd_set(tid, raw)
+
+    if a[0] == "call" and len(a) >= 2:
+        return cmd_call(a[1], a[2:])
+
     if a[0] == "restart":
         return cmd_restart()
+
     print(__doc__)
+    print("")
+    print("开关：  python3 panel_api.py set sw:casual_dm off")
+    print("文本：  cat new.md | python3 panel_api.py set text_persona")
+    print("操作：  python3 panel_api.py call status|logs|diary_list|diary_read")
     return 2
 
 

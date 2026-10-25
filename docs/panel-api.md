@@ -17,14 +17,80 @@
    （每天限制）    （插件行为）      （主动行为）    （B站时间窗）         （token 预算）
 ```
 
+## 四类能力（不只是参数）
+
+面板要管的东西分四类，`panel_api.py` 都给了入口：
+
+| 类 | 数量 | 怎么调 | 例子 |
+|---|---|---|---|
+| **① 参数** | 24 | `set <id> <值>` | `set casualEngageRate 0.3` |
+| **② 开关** | 12 | `set sw:<id> on\|off` | `set sw:casual_dm off` |
+| **③ 文本** | 2 | `get text_x` / 管道写入 | `cat new.md \| set text_persona` |
+| **④ 操作** | 6 | `call <名字>` | `call status` / `call logs 80` |
+
+`list --json` 一次拿全四类，每条都有 `group`，面板直接分组渲染。
+
+### ② 开关
+
+直接复用 `switches.py`（不在 panel_api 里再写一套，避免两边跑偏）：
+
+```bash
+python3 panel_api.py set sw:casual_dm off
+→ {"ok": true, "id": "sw:casual_dm", "value": false, "message": "[OK] 私聊主动找人 → 关"}
+```
+
+包含：群聊主动接话 / 私聊主动找人 / 日记提醒 / 每日说说 / 收图结算 / 记忆蒸馏 /
+每日日报 / QQ 掉线看护 / 补丁漂移检测 / 每日自动更新 / 预算熔断 / 图片内容筛查。
+
+### ③ 文本（人设 / 长期笔记）
+
+文本类项 `value` 里不直接带全文（可能上万字），只给元信息：
+
+```json
+{"id": "text_persona", "type": "text",
+ "value": {"path": "/opt/dsh/media/onebot/persona.md", "chars": 8952, "lines": 254},
+ "restart": true}
+```
+
+面板打开编辑器时调 `get <id>` 拿全文（字段 `text`），保存时**用 stdin 传全文**：
+
+```bash
+python3 panel_api.py get text_persona            # 拿全文
+cat new_persona.md | python3 panel_api.py set text_persona   # 写回
+```
+
+写之前会存 `.bak-panel`，空内容会被拒绝（防止误清空）。
+
+### ④ 操作
+
+| 名字 | 作用 |
+|---|---|
+| `status` | dsh-onebot / llm-shim / QQ 连接状态（面板首页用） |
+| `restart` | 重启 dsh-onebot（`restart=true` 的项改完要调它） |
+| `logs [n]` | 日志尾部，默认 40 行 |
+| `diary_list` | 有哪几个月的日记、各多少条 |
+| `diary_read [n]` | 读最近 n 条日记 |
+| `stickers_count` | 表情库统计（库存 / 用过 / 场景分布） |
+
+示例：
+
+```bash
+$ python3 panel_api.py call status
+{"ok": true, "dsh-onebot": "active", "llm-shim": "active",
+ "qq": "OneBot: 已连接\n本小时重启次数: 0 / 3"}
+
+$ python3 panel_api.py call diary_list
+{"ok": true, "files": [{"file": "2026-10.md", "entries": 8, "chars": 1071}]}
+```
+
 ## 三条命令
 
 ```bash
-python3 panel_api.py list                 # 人看的表格（分组）
-python3 panel_api.py list --json          # 面板用：全部控件 + 当前值 + 元数据
-python3 panel_api.py set <id> <值>        # 改一个，返回 JSON
-python3 panel_api.py get <id>             # 看一个的完整描述
-python3 panel_api.py restart              # 重启 dsh-onebot（让 restart=true 的项生效）
+python3 panel_api.py list                 # 人看的表格（分四组）
+python3 panel_api.py list --json          # 面板用：全部项 + 当前值 + 元数据
+python3 panel_api.py get <id>             # 看一个（文本类返回全文）
+python3 panel_api.py set <id> <值>        # 改参数 / 开关 / 文本
+python3 panel_api.py call <操作>           # status / restart / logs / diary_list …
 ```
 
 ## 控件描述长什么样
