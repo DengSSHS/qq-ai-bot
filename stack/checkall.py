@@ -617,6 +617,29 @@ try:
 except Exception as e:
     warn("调度器检查失败：%s" % e)
 
+# ---------------- 19. QQ 登录状态 ----------------
+sec("19. QQ 登录状态")
+try:
+    rc, out, _e = sh(r"docker logs --since 12h napcat 2>&1 | grep -a '账号已离线\|登录成功\|扫码' "
+                     "| tail -5")
+    lines = [ln for ln in (out or "").split(chr(10)) if ln.strip()]
+    last_ok = ""
+    last_bad = ""
+    for ln in lines:
+        if "登录成功" in ln:
+            last_ok = ln
+        if "账号已离线" in ln or "扫码" in ln:
+            last_bad = ln
+    if last_bad and (not last_ok or lines.index(last_bad) > lines.index(last_ok) if last_ok in lines else True):
+        bad("QQ 可能已掉线（NapCat 等扫码）：%s" % last_bad.strip()[-60:])
+        warn("二维码/扫码链接见 docker logs napcat | grep txz.qq.com")
+    elif last_ok:
+        ok("QQ 在线（最近一次：%s）" % last_ok.strip()[-50:])
+    else:
+        warn("日志里没看到登录/掉线记录（刚装或日志被清）")
+except Exception as e:
+    warn("登录状态检查失败：%s" % e)
+
 # ---------------- 总结 ----------------
 print()
 print("=" * 62)
