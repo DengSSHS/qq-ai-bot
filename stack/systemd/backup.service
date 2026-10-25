@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily backup (manifest + tar + verify) of memory and config
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/dsh
+EnvironmentFile=-/opt/dsh/qwen.env
+ExecStart=/usr/bin/python3 /opt/dsh/backup.py
+Nice=15

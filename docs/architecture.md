@@ -127,23 +127,40 @@ verify = "checkall:tool_qq_emoji_like"
 
 ---
 
-## ⑥ 统一备份与迁移 ⬜
+## ⑥ 统一备份与迁移 ✅（2026-10-26 已上线）
 
 **现状核实**：`/opt/dsh` 下 113 个备份痕迹、53 个 `.bak-*`，还有 `switch-backups/`、`dupes/`、
 `vendor/lib-before-rebuild/`。迁服务器时极易漏掉某个 `index.json` → 她"失忆"。
 
-**最小可做**：`backup.py`
+**已实现** `backup.py`：
 
 ```
-数据（必须带）: memory/diary, memory/knowledge.json, memory/session_log,
-                media/onebot/persona.md, media/onebot/stickers/, limits.json,
-                workspace/AGENTS.md, profiles/web/cordis.patch.yml, limits 相关
-可再生（不用带）: search.db, session_projcache, __pycache__, .bak-*, vendor/fork-*
-输出: 一个 tar.gz + MANIFEST.txt（含文件数/校验和/生成时间）
+DATA（默认打包，12 项 ≈ 30KB）
+  memory/diary/           日记正文 + index.json（遗忘曲线的 hits 在这里）
+  memory/knowledge.json   事实库
+  memory/session_log/     历史会话摘要
+  memory/session_summary.md, notes.md, layers_state.json
+  memory/bili-watched.jsonl
+  limits.json, media/onebot/persona.md, workspace/AGENTS.md,
+  profiles/web/cordis.patch.yml, qwen.env
+可选
+  --with-sessions   会话原文（37M）
+  --with-stickers   贴纸库（2.8G，可重下）
+可再生（明确不带）
+  search.db / vision_cache / *.log / schedule-state / qqguard.json /
+  node_modules / vendor/fork-* / __pycache__ / .bak-* / backups
 ```
 
-**验收**：`python3 backup.py --verify <tar>` 能在干净目录里还原出三层记忆并跑通
-`mem_layers.py status`。
+- 每次输出 `backups/backup-<时间戳>.tar.gz` + `MANIFEST-<时间戳>.txt`（每个文件带 sha256）
+- 自动只留最近 20 份
+- `backup.timer` 每天 04:10 跑
+
+**验收（已过）**：
+
+```
+打包 12 项 → 30K tar
+--verify → 清单里 11 个文件 / 1 个目录，[OK] 全部校验通过
+```
 
 ---
 

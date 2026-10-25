@@ -2,6 +2,49 @@
 
 本项目按「改了什么 + 为什么」记录，不按版本号堆功能。所有日期为实际改动日期。
 
+## v0.9.2 — 2026-10-26 · 统一备份（六条里的第 6 条，最小可用版）
+
+散着 113 处备份痕迹，却没有一个清单能回答"迁机器该带走什么"。这一版给答案。
+
+### 清单分两类（写死在 `backup.py` 里，不是靠记性）
+
+```
+DATA（默认带，12 项 ≈ 30KB）
+  memory/diary/           日记 + index.json（遗忘曲线的 hits 在这）
+  memory/knowledge.json   事实库
+  memory/session_log/     历史会话摘要
+  memory/session_summary.md / notes.md / layers_state.json
+  memory/bili-watched.jsonl
+  limits.json / persona.md / workspace/AGENTS.md
+  profiles/web/cordis.patch.yml / qwen.env
+
+可选  --with-sessions(37M) / --with-stickers(2.8G，可重下)
+
+可再生（明确不带）search.db、vision_cache、*.log、schedule-state、
+                 node_modules、vendor/fork-*、__pycache__、.bak-*、backups
+```
+
+### 产出与校验
+
+- `backups/backup-<YYYYmmdd-HHMMSS>.tar.gz` + `MANIFEST-<同戳>.txt`
+- 清单里每个文件带 sha256；`--verify` 解到临时目录逐项比对
+- 自动只留最近 20 份（备份自己不能变成垃圾场）
+- `backup.timer` 每天 04:10
+
+### 实测
+
+```
+打包 12 项，原始 0.1 MB → 30K tar，0.0 秒
+--verify → 清单里 11 个文件 / 1 个目录，[OK] 全部校验通过
+```
+
+（第一次跑时把索引路径写错成 `memory/index.json`，实际在 `memory/diary/index.json`；
+少了它 = 遗忘曲线的 hits 全丢，排序退化 —— 正是这个脚本要防的那类"静默失忆"。）
+
+### 六条进度
+
+① 事件适配层 ✅ · ② 发送收口 🟡 · ③ 上下文装配 🟡 · ④ 能力注册表 🟡 · ⑤ 调度器 🟡 · ⑥ 备份 ✅
+
 ## v0.9.1 — 2026-10-26 · 统一事件适配层（六条架构欠账的第 1 条）
 
 你列的六条我逐条核了代码，结论和动作：

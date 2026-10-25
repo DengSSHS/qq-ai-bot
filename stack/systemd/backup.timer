@@ -1,0 +1,10 @@
+[Unit]
+Description=Backup every day at 04:10
+
+[Timer]
+OnCalendar=*-*-* 04:10:00
+AccuracySec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
