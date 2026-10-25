@@ -14,6 +14,7 @@
 "主人的提醒"，走插件已有的真实入站管线。零常驻进程、零依赖。
 """
 import hashlib
+import glob
 import json
 import os
 import sys
@@ -107,12 +108,39 @@ def fire_minute(routine, day):
     return start + h % span
 
 
-def idle_minutes():
-    """最后一次发消息到现在多久（用 qq-actions.log 的 mtime 近似）"""
+def last_activity_ts():
+    """最后一次性活动（任一方说话）的时间戳。
+
+    取多个来源里最新的那个：
+      - qq-actions.log：她发出消息的时刻
+      - session 文件 mtime：任何一方的回合都会追加，写入即更新
+    以前只看 qq-actions.log，而它在 dry-run 开启时从不生成，
+    结果 idle 恒为无穷大，概率模型永远跑在最高档（v0.7.12/13 的失真）。
+    """
+    cands = [ACTIONS]
     try:
-        return (time.time() - os.path.getmtime(ACTIONS)) / 60.0
+        for pat in ("onebot-private-*", "onebot-group-*"):
+            cands.extend(glob.glob(os.path.join(BASE, "sessions", "*", pat,
+                                                "session.v4.jsonl.zstd")))
     except Exception:
+        pass
+    newest = 0.0
+    for f in cands:
+        try:
+            mt = os.path.getmtime(f)
+            if mt > newest:
+                newest = mt
+        except Exception:
+            continue
+    return newest
+
+
+def idle_minutes():
+    """最后一次有活动到现在多久（分钟）。拿不到任何来源时返回 1e9。"""
+    ts = last_activity_ts()
+    if not ts:
         return 1e9
+    return (time.time() - ts) / 60.0
 
 
 def inject(text):
