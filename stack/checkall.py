@@ -620,44 +620,27 @@ except Exception as e:
 
 # ---------------- 19. QQ 登录状态 ----------------
 sec("19. QQ 登录状态")
+# 判定依据：问 NapCat 自己的 get_status，不从日志猜
+# （日志推断今晚误判三次：没打「登录成功」被判掉线、风控下线却看不出来）
 try:
     import json as _j3
-    import time as _t3
-    since = _t3.time() - 900          # 最近 15 分钟
-    # 证据一：审计里有没有真实发出去的消息
-    ok_sends = 0
+    rc, out, err = sh("cd /opt/dsh && python3 qq_status.py --json", timeout=60)
+    st = {}
     try:
-        for line in io.open("/opt/dsh/media/onebot/send_audit.jsonl", encoding="utf-8"):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                row = _j3.loads(line)
-            except Exception:
-                continue
-            if float(row.get("ts") or 0) >= since and row.get("ok") and row.get("message_id"):
-                ok_sends += 1
+        st = _j3.loads((out or "{}").strip().split(chr(10))[-1])
     except Exception:
-        pass
-    # 证据二：NapCat 侧最近有没有收发 / 是否在等扫码
-    rc, nav, _e = sh(r"docker logs --since 15m napcat 2>&1 | grep -a -c '发送 ->\|接收 <-'")
-    rc2, qr, _e2 = sh(r"docker logs --since 15m napcat 2>&1 | grep -a -c '请扫描\|账号已离线'")
-    try:
-        nav_n = int(nav or 0)
-    except Exception:
-        nav_n = 0
-    try:
-        qr_n = int(qr or 0)
-    except Exception:
-        qr_n = 0
-
-    if ok_sends > 0 or nav_n > 0:
-        ok("QQ 在线（最近 15 分钟：真实发出 %d 条，NapCat 收发 %d 条）" % (ok_sends, nav_n))
-    elif qr_n > 0:
-        bad("QQ 已掉线（NapCat 在等扫码）")
-        warn("取最新二维码：cd /opt/dsh && python3 qr_now.py")
+        st = {}
+    if not st:
+        warn("拿不到登录状态（qq_status.py 输出异常）：%s" % ((out or err)[:80]))
+    elif st.get("online"):
+        ok("QQ 在线：%s (%s)｜good=%s" % (st.get("nick"), st.get("uin"), st.get("good")))
+    elif st.get("container") is False:
+        bad("NapCat 容器没在跑（docker ps 里没有 napcat）")
     else:
-        warn("最近 15 分钟没有任何收发（可能没人说话，也可能是掉线）")
+        bad("QQ 掉线：%s" % st.get("reason", "接口报告 offline"))
+        if st.get("risk_hint"):
+            warn("最近 30 分钟日志里有 %d 条「请扫描/账号已离线/风险」——可能是 QQ 风控" % st["risk_hint"])
+        warn("重新登录：cd /opt/dsh && python3 qr_now.py（会打印最新扫码链接）")
 except Exception as e:
     warn("登录状态检查失败：%s" % e)
 
