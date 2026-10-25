@@ -9,6 +9,13 @@ set -uo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")" || exit 1
 
+# 自动提权：云服务器默认账号常是 ubuntu/centos（不是 root），
+# 而 install.sh 必须 root。以前会跑到一半才报"请用 root"，像脚本 bug。
+if [ "$(id -u)" != "0" ]; then
+  printf '[提示] 需要 root 权限，自动用 sudo 重新执行…\n'
+  exec sudo -E bash "$0" "$@"
+fi
+
 say() { printf '\n== %s ==\n' "$*"; }
 die() { printf '[FAIL] %s\n' "$*"; exit 1; }
 

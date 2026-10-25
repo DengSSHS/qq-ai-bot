@@ -2,6 +2,32 @@
 
 本项目按「改了什么 + 为什么」记录，不按版本号堆功能。所有日期为实际改动日期。
 
+## v0.7.28 — 2026-10-25 · 干净机端到端验证：抓出四个真 bug
+
+用一台按小时计费的干净 Ubuntu 24.04（2 核 1.9G，默认 `ubuntu` 账号）从零跑
+`bash deploy.sh`。抓出四个 bug，其中两个会让新装机器直接残废：
+
+1. **`PY: unbound variable`**（我当天引入）：`install.sh` 里用了 `update.sh` 的变量，
+   `set -u` 下直接崩
+2. **登录失败会中断整个安装**：第 8 步 `exit 2` → 第 9 步 systemd 根本没执行，
+   出现「Unit dsh-onebot.service could not be found」。改成不中断，继续装服务
+3. **所有 MCP 被 dsh 禁用**（最严重）：日志里 `disabling profile plugin row "mcp-*"`，
+   记忆/看图/联网/生图/表情/管理全没了，只剩聊天。真因是
+   `profiles/web/compatibility.json`（版本豁免）**只是作者手工加的，安装脚本从未创建**——
+   任何人新装都是残废版且不报错。已进仓库 + install.sh 写入，修后 6 个 MCP 全起
+4. **Docker Hub 拉不到镜像**（国内常见，生产机因早拉过未暴露）：
+   install.sh 新增 `/etc/docker/daemon.json` 镜像加速（腾讯云内网优先）
+5. `deploy.sh` 在非 root 账号下跑到一半才失败 → 开头自动 `sudo -E` 重跑
+
+验证结果（未登录 QQ）：`16 passed, 2 failed`——两项都是登录依赖
+（OneBot not connected / checkall）。除扫码外全部通过。
+
+**没跑到 `VERDICT: READY`**：最后一步要扫码会踢掉生产机的鲸鲸，所以结论是
+「除登录外全部通过」，不是「完全通过」。
+
+另外发现 `preflight` 在部署目录里必报两条（deploy.env 必须存在 vs 不该被提交），
+逻辑冲突，未改。
+
 ## v0.7.27 — 2026-10-25 · 日记系统：额度被饿死 + 写完不告诉你
 
 日记文件没坏（10-24 有两条），坏的是“该发的时候发不出来”和“写完了你不知道”。

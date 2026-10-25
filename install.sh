@@ -149,6 +149,27 @@ else
   ok "docker 已装"
 fi
 systemctl enable --now docker >>"$LOG" 2>&1 || warn "docker 服务启动有异常"
+
+# 国内机器拉 Docker Hub 会超时（i/o timeout），必须配镜像加速，
+# 否则第 8 步拉 NapCat 镜像直接失败（2026-10-25 干净机实测）。
+# 腾讯云机器用内网镜像最快；其它云依次回落。
+if [ ! -f /etc/docker/daemon.json ]; then
+  mkdir -p /etc/docker
+  cat > /etc/docker/daemon.json <<'DOCKERMIRROR'
+{
+  "registry-mirrors": [
+    "https://mirror.ccs.tencentyun.com",
+    "https://docker.m.daocloud.io",
+    "https://docker.1ms.run"
+  ]
+}
+DOCKERMIRROR
+  systemctl restart docker >>"$LOG" 2>&1 || warn "docker 重启失败"
+  sleep 3
+  ok "docker 镜像加速已配置（腾讯云内网优先）"
+else
+  ok "docker 镜像配置已存在，保持不动"
+fi
 docker info >/dev/null 2>&1 || die "docker 守护进程没起来"
 DC="docker compose"
 $DC version >/dev/null 2>&1 || die "docker compose 插件不可用"
@@ -190,7 +211,9 @@ chmod +x "$DSH_HOME"/*.sh 2>/dev/null
 # 记下基线（哈希），以后 update.sh 靠它区分「没人动过」和「使用者自己改过」。
 # 不记的话，第一次更新就搞不清哪些文件被改过，只能保守地不更新。
 if [ -f "$STACK/sync_scripts.py" ]; then
-  "$PY" "$STACK/sync_scripts.py" --adopt >/dev/null 2>&1 || warn "基线记录失败（不影响使用，更新时会保守处理）"
+  # 注意：install.sh 里没有 $PY 变量（那是 update.sh 的），必须写死 python3，
+  # 否则 set -u 下直接 unbound variable 崩掉（2026-10-25 干净机实测）。
+  python3 "$STACK/sync_scripts.py" --adopt >/dev/null 2>&1 || warn "基线记录失败（不影响使用，更新时会保守处理）"
 fi
 # 脚本里的占位符也要替换（checkall.py / audit.sh 里写死了 botQQ 和主人 QQ）
 for f in "$DSH_HOME"/*.py "$DSH_HOME"/*.sh; do
@@ -285,6 +308,15 @@ ok "cordis.patch.yml 写好"
 
 # 7.3 profile 依赖
 cp -f "$STACK/profile-package.json" "$DSH_HOME/profiles/web/package.json"
+# 插件版本豁免（关键）：dsh 0.2.1-rc.2 会把 dsh-mcp-client@0.0.1-rc.1 判定为不兼容并
+# **禁用全部 MCP**（记忆/看图/联网/生图/表情/管理全没了，只剩聊天）。
+# 这个文件以前只存在于作者机器上，导致任何新装机器都是残废版（2026-10-25 干净机实测）。
+if [ -f "$STACK/compatibility.json" ]; then
+  cp -f "$STACK/compatibility.json" "$DSH_HOME/profiles/web/compatibility.json"
+  ok "插件版本豁免已写入（否则所有 MCP 会被 dsh 禁用）"
+else
+  warn "没有 compatibility.json，MCP 插件可能被 dsh 判定不兼容而禁用"
+fi
 sed -i 's|"file:./node_modules/local-memory"|"file:./local-memory"|' "$DSH_HOME/profiles/web/package.json"
 rm -rf "$DSH_HOME/profiles/web/local-memory"
 cp -a "$STACK/local-memory" "$DSH_HOME/profiles/web/local-memory"
@@ -416,14 +448,21 @@ if [ ! -f "$OB" ]; then
   python3 "$HERE/qr_wait.py" "$OB"
   rc=$?
   if [ "$rc" -ne 0 ]; then
+    # 不中断：登录可以事后补，但服务/定时器必须装完，
+    # 否则会出现"装完了但 dsh-onebot 服务不存在"（2026-10-25 干净机实测踩到）。
     say ""
-    say "  还没登录。人类扫完码后重新运行：  bash install.sh"
-    exit 2
+    warn "QQ 还没登录 —— 先继续装服务，扫码后再执行一次 bash install.sh 补齐"
+    PENDING_LOGIN=1
+  else
+    ok "检测到登录成功，继续"
   fi
-  ok "检测到登录成功，继续"
+fi
+if [ "${PENDING_LOGIN:-0}" = "1" ] && [ ! -f "$OB" ]; then
+  say "  跳过反向 WS 配置（需要先登录拿到 onebot 配置）"
 fi
 
 # 登录后：写入反向 WS 客户端配置（让 NapCat 主动连宿主 8643）
+if [ -f "$OB" ]; then
 cp -f "$OB" "$OB.bak-$(date +%s)"
 python3 - "$OB" "$GW" "$BOT_QQ" "$WS_TOKEN" <<'PY'
 import json, sys
@@ -452,6 +491,9 @@ json.dump(d, open(path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
 print("  反向 WS 已写入:", me["url"])
 PY
 docker restart napcat >>"$LOG" 2>&1
+else
+  warn "没登录，暂时不写反向 WS（登录后重跑本脚本会补上）"
+fi
 ok "NapCat 已指向 ws://${GW}:8643/ws"
 
 # ── 9. systemd ────────────────────────────────────────────────────────
