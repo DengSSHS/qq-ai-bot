@@ -40,12 +40,13 @@
 `limits.json`：
 
 ```json
-"bubble_max_private": 4,
-"bubble_max_group": 2
+"bubble_max_private": 0,   // 0 = 不限（默认）
+"bubble_max_group": 0
 ```
 
-- 私聊 4 条、群聊 2 条，超出**合并**（段间空行），绝不静默丢弃
-- 表情包不占文本条数（本来就单独走 `send_msg`，只是过去会被 3 条上限挤掉）
+- **默认不限**：一句一个气泡，长回复不会再被压成长条
+- 接口保留：想让哪边收敛就写正整数，超出部分**合并**（段间空行），绝不静默丢弃
+- 表情包不占文本条数（本来就单独走 `send_msg`）
 
 ### 3. 表情从"提醒"改成"授权"
 
@@ -88,8 +89,8 @@
   "recall_k": 8,
   "recall_budget": 2000,
   "idle_minutes": 10,
-  "bubble_max_private": 4,
-  "bubble_max_group": 2
+  "bubble_max_private": 0,
+  "bubble_max_group": 0
 }
 ```
 

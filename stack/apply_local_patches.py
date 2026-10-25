@@ -600,16 +600,15 @@ def patch_mem_layers(apply_):
 
 
 def patch_bubble_spread(apply_):
-    """气泡条数上限从 limits.json 读（私聊/群聊分开），超限合并、不截断。
+    """气泡条数：默���不限（一句一个气泡），合并逻辑保留为可选闸门。
 
-    2026-10-26：原来硬编码「超过 3 句合并回 3 条」，长回复被压成难读的长条。
-    按方案第一步：私聊默认 4 条、群聊默认 2 条，都可在 limits.json 里改；
-    超出就合并（段间空行），**绝不静默丢弃**。
+    历史：原来硬编码「超过 3 句合并回 3 条」，长回复被压成难读的长条。
+    2026-10-26 用户明确「我不要限制，不过预留接口」→ 默认 0 = 不限，
+    想收敛时改 limits.json 的 bubble_max_private / bubble_max_group（正整数）。
+    超出闸门时合并（段间空行），**绝不静默丢弃**。
     """
     p = os.path.join(LIB, "bridge.js")
     s = rd(p)
-    if "BUBBLE_LIMIT_CFG" in s:
-        return "已打"
 
     # 需要同步读文件
     if "readFileSync" not in s.split("export class")[0]:
@@ -617,27 +616,43 @@ def patch_bubble_spread(apply_):
         if anchor not in s:
             return "跳过（找不到 fs import）"
         s = s.replace(anchor, anchor + chr(10) + "import { readFileSync } from 'node:fs';", 1)
+        wr(p, s)
 
-    old = """        if (parts.length > 3) {
+    old_a = """        if (parts.length > 3) {
             const per = Math.ceil(parts.length / 3);"""
-    old2 = """        // local patch (BUBBLE_SPREAD): 上限 3 → 6，超出的才合并
+    old_b = """        // local patch (BUBBLE_SPREAD): 上限 3 → 6，超出的才合并
         if (parts.length > 6) {
             const per = Math.ceil(parts.length / 6);"""
-    new = """        // local patch (BUBBLE_LIMIT_CFG): 上限从 limits.json 读（私聊/群聊分开），
-        // 超出就合并成 maxParts 条，**不截断**。
-        let maxParts = 4;
+    old_c = """        let maxParts = 4;
+        try {"""
+    new = """        // local patch (BUBBLE_LIMIT_CFG): 默认 0 = 不限条数（一句一个气泡）。
+        // 想收敛就改 limits.json 的 bubble_max_private / bubble_max_group；超出合并，不截断。
+        let maxParts = 0;
         try {
             const lim = JSON.parse(readFileSync((process.env.DSH_HOME || '/opt/dsh') + '/limits.json', 'utf8'));
             const isGroup = params && params.group_id !== undefined && params.group_id !== null;
-            maxParts = Number(isGroup ? lim.bubble_max_group : lim.bubble_max_private) || maxParts;
+            const v = Number(isGroup ? lim.bubble_max_group : lim.bubble_max_private);
+            if (Number.isFinite(v) && v >= 0)
+                maxParts = v;
         }
         catch (e) { void e; }
-        if (maxParts > 1 && parts.length > maxParts) {
+        if (maxParts > 0 && parts.length > maxParts) {
             const per = Math.ceil(parts.length / maxParts);"""
-    if old in s:
-        s = s.replace(old, new, 1)
-    elif old2 in s:
-        s = s.replace(old2, new, 1)
+
+    if "maxParts = 0;" in s and "bubble_max_private" in s:
+        return "已打"
+    if old_c in s:
+        # 旧版配置化（默认 4）→ 改成默认 0
+        body_start = s.index(old_c)
+        tail_anchor = "        if (maxParts > 1 && parts.length > maxParts) {\n            const per = Math.ceil(parts.length / maxParts);"
+        if tail_anchor in s:
+            s = s[:body_start] + new + s[s.index(tail_anchor) + len(tail_anchor):]
+        else:
+            return "跳过（找不到合并闸门）"
+    elif old_a in s:
+        s = s.replace(old_a + "\n            const merged", new + "\n            const merged", 1)
+    elif old_b in s:
+        s = s.replace(old_b + "\n            const merged", new + "\n            const merged", 1)
     else:
         return "跳过（找不到分句上限）"
     if not apply_:
@@ -656,7 +671,7 @@ PATCHES = [
     ("inject+bridge 注入按条 dry_run（测试不打扰主人）",
      patch_inject_per_event_dry),
     ("mem_layers 三层记忆接线（每轮检索 + 摘要注入）", patch_mem_layers),
-    ("bridge.js 气泡上限读 limits.json（私聊4/群2）", patch_bubble_spread),
+    ("bridge.js 气泡默认不限（0=不限，接口保留）", patch_bubble_spread),
 ]
 
 

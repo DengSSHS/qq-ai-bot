@@ -2,6 +2,29 @@
 
 本项目按「改了什么 + 为什么」记录，不按版本号堆功能。所有日期为实际改动日期。
 
+## v0.8.2 — 2026-10-26 · 气泡默认不限条数（接口保留）
+
+用户：「我不要限制，不过预留接口」。
+
+- `limits.json`：`bubble_max_private: 0`、`bubble_max_group: 0`，**0 = 不限**
+- `bridge.js`：`maxParts = 0` 时跳过合并分支，一句一个气泡原样发出；
+  想收敛就写正整数，超出部分合并（段间空行）、**不截断**
+- 阈值仍然每轮从 `limits.json` 现读，改完即时生效，不用重启
+
+代码形状（`guardedConnectionCall` 之前的分句层）：
+
+```js
+let maxParts = 0;                       // 默认不限
+...
+if (maxParts > 0 && parts.length > maxParts) {   // 只有配了正整数才合并
+    const per = Math.ceil(parts.length / maxParts);
+    ...
+}
+```
+
+副作用说明：她的长回复现在会连着发多条气泡（间隔 0.3~0.7 秒）。
+兜底还在：`actionRatePerMinute: 20`、`qq_action_per_day: 2000`。
+
 ## v0.8.1 — 2026-10-26 · 通道修复：日记搬出 QQ，条数可配，表情不再被催
 
 按「对话与记忆大修方案（统一版）」的第一步做。原则：**NapCat 只负责"她说了什么"，
