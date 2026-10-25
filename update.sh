@@ -180,9 +180,25 @@ say "5/6 重启服务"
 if [ "$DRY" = "1" ]; then
   warn "dry-run：不重启"
 else
-  systemctl restart dsh-onebot || die "重启失败，看 journalctl -u dsh-onebot"
-  sleep 12
-  systemctl is-active --quiet dsh-onebot && ok "dsh-onebot 已重启" || die "服务没起来"
+  # 服务单位可能还没装（旧版安装若在"等扫码"超时就退出了，第 9 步没执行）。
+  # 这种情况要先把 unit 装上并 enable，而不是直接报"重启失败"。
+  if [ ! -f /etc/systemd/system/dsh-onebot.service ] && [ -d "$PWD/stack/systemd" ]; then
+    warn "dsh-onebot.service 不存在 —— 先把 systemd 单位装上"
+    cp -f "$PWD/stack/systemd"/*.service "$PWD/stack/systemd"/*.timer \
+          "$PWD/stack/systemd"/*.path /etc/systemd/system/ 2>/dev/null
+    mkdir -p /etc/systemd/system/dsh-onebot.service.d
+    cp -f "$PWD/stack/systemd/dsh-onebot.service.d"/*.conf \
+          /etc/systemd/system/dsh-onebot.service.d/ 2>/dev/null
+    systemctl daemon-reload
+    ok "systemd 单位已安装"
+  fi
+  if systemctl restart dsh-onebot 2>/dev/null; then
+    sleep 12
+    systemctl is-active --quiet dsh-onebot && ok "dsh-onebot 已重启" \
+      || warn "dsh-onebot 没起来：journalctl -u dsh-onebot -n 30"
+  else
+    warn "dsh-onebot 重启失败（配置与脚本已更新，服务需人工拉起）"
+  fi
 fi
 
 # ── 6. 自检 ────────────────────────────────────────────────────────────

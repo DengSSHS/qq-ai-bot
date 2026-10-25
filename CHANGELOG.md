@@ -2,6 +2,25 @@
 
 本项目按「改了什么 + 为什么」记录，不按版本号堆功能。所有日期为实际改动日期。
 
+## v0.7.31 — 2026-10-25 · 自动更新实测：三个连环 bug
+
+用「仓库停在 v0.7.27 → 让自动更新升到 v0.7.30」做真机测试，抓出三个连环 bug：
+
+1. **detached HEAD 被误报成“本地有改动”**：`git checkout v0.7.27` 后 HEAD detached，
+   `git pull --ff-only` 永远不能快进；脚本却打印“本地有改动？”。
+   → 拉取前先判断 `abbrev-ref HEAD == HEAD`，是就 `checkout -B main origin/main`
+2. **切完分支还在用旧提交号判断**：`CUR_COMMIT`/`CUR_VER` 在切分支前取好，
+   `BEHIND` 算成 0 → “无更新”退出，`update.sh` 根本没跑（部署仍旧）。
+   → 切后重新取变量 + `NEED_DEPLOY=1`，即使 BEHIND=0 也补一次部署
+3. **服务单位不存在 → 更新失败 → 回滚也失败**：旧版安装因“等扫码超时 exit 2”，
+   第 9 步 systemd 没执行，`dsh-onebot.service` 不存在；update.sh 直接 restart 失败。
+   → 重启前检查 unit，不存在就先装 `stack/systemd/*` + daemon-reload
+
+顺带发现：自动更新会覆盖它自己（从仓库旧 tag 同步 `auto_update.sh` 回旧逻辑），
+第 2 条的修复间接解决了这一点（先切 main 再同步）。
+
+修复已提交；**完整“升级成功”闭环待下一版补验**。
+
 ## v0.7.30 — 2026-10-25 · 清空重装验证：又抓到一个时序 bug
 
 对同一台干净机做了完整“清空 → 从零装”：删 `/opt/dsh`、`/opt/node`、`/opt/qqbot`、

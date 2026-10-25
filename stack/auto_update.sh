@@ -83,11 +83,34 @@ if ! git fetch --quiet origin 2>>"$LOG"; then
 fi
 
 BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
+
+# detached HEAD（比如有人 git checkout 到某个 tag）→ pull 永远不能快进，
+# 而脚本以前会误报成"本地有改动"。这里先回到远端分支。
+if [ "$BRANCH" = "HEAD" ]; then
+  DETACHED_AT="$(git rev-parse --short HEAD)"
+  log "当前是 detached HEAD（停在 $DETACHED_AT），尝试切回 origin/main"
+  if git checkout -q -B main "origin/main" 2>>"$LOG"; then
+    BRANCH=main
+    # 切分支会改变工作区内容，之前取的版本号/commit 已过期，必须重新取
+    CUR_COMMIT="$(git rev-parse --short HEAD)"
+    CUR_VER="$(cat VERSION 2>/dev/null || echo '?')"
+    # 切分支已经把工作区代码换成新版，但 /opt/dsh 里部署的还是旧的，
+    # 所以即使 BEHIND=0 也必须跑一次 update.sh，否则会误报“无更新”。
+    NEED_DEPLOY=1
+    log "已切回 main（$CUR_COMMIT / $CUR_VER）"
+  else
+    log "切回 main 失败（工作区可能有未提交改动），本次放弃。处理办法：git stash 或 git checkout main"
+    exit 1
+  fi
+fi
 BEHIND="$(git rev-list --count "HEAD..origin/$BRANCH" 2>/dev/null || echo 0)"
 
 if [ "$BEHIND" = "0" ] && [ "$MODE" != "force" ]; then
-  log "无更新（当前 $CUR_VER / $CUR_COMMIT）"
-  exit 0
+  if [ "${NEED_DEPLOY:-0}" != "1" ]; then
+    log "无更新（当前 $CUR_VER / $CUR_COMMIT）"
+    exit 0
+  fi
+  log "代码已是最新（$CUR_VER），但刚切过分支，补一次部署"
 fi
 
 NEW_VER="$(git show "origin/$BRANCH:VERSION" 2>/dev/null || echo '?')"
@@ -104,7 +127,8 @@ printf '{"from_commit":"%s","from_version":"%s","at":"%s"}\n' \
 
 # ── 更新 ───────────────────────────────────────────────────────────────
 if ! git pull --ff-only --quiet 2>>"$LOG"; then
-  log "失败：git pull 没能快进（本地有改动？），放弃本次更新"
+  log "失败：git pull 没能快进。常见原因：工作区有未提交改动，或本地有提交与远端分叉。"
+  log "  处理办法：cd <仓库> && git stash（保留改动）或 git status 看清楚再决定。"
   exit 1
 fi
 NEW_COMMIT="$(git rev-parse --short HEAD)"
