@@ -1,0 +1,10 @@
+[Unit]
+Description=Idle memory distillation (three-layer memory: temp -> big)
+After=network-online.target dsh-onebot.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/dsh
+EnvironmentFile=-/opt/dsh/qwen.env
+ExecStart=/usr/bin/python3 /opt/dsh/mem_layers.py idle
+Nice=15

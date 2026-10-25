@@ -14,6 +14,8 @@
   4. index.js    上面两个配置键的 schema 与 gateConfig 透传
   5. cq.js       未知表情不再兜底成笑脸
   6. inject.js + bridge.js  注入事件带 dry_run 时只拦这一轮出站（测试不打扰主人）
+  7. inbound.js + prompt.js 三层记忆接线：每轮检索大记忆库 + 注入临时层摘要
+  8. bridge.js  气泡上限 3→6（长回复保持分散，不再合并成长条）
 
 用法（在服务器上，以 root）：
     python3 apply_local_patches.py            # 打补丁
@@ -516,6 +518,109 @@ def patch_inject_per_event_dry(apply_):
     return "已打"
 
 
+def patch_mem_layers(apply_):
+    """三层记忆接线：每轮真实检索 + 临时层摘要注入。
+
+    2026-10-26 之前：MEM_HINT 只在命中触发词时提示她「你可以去查日记」，
+    实测她几乎不查（问过去的事全靠印象编）。这里把"提醒"换成"直接捞给她"，
+    并把临时层的滚动摘要（mem_layers.py 写的 session_summary.md）每轮注入。
+    """
+    ib = os.path.join(LIB, "inbound.js")
+    pr = os.path.join(LIB, "prompt.js")
+    si = rd(ib)
+    sp = rd(pr)
+    todo = []
+
+    def sub(text, old, new, tag):
+        if new in text:
+            return text
+        if old not in text:
+            todo.append(tag + "（锚点没找到）")
+            return text
+        todo.append(tag)
+        return text.replace(old, new, 1)
+
+    # 1) inbound.js 需要 child_process
+    si = sub(si,
+             "import { writeFile } from 'node:fs/promises';",
+             "import { writeFile } from 'node:fs/promises';"
+             + chr(10) + "import { execFileSync } from 'node:child_process';",
+             "child_process 导入")
+
+    # 2) 把「提醒她查」换成「直接检索并附上」
+    si = sub(si,
+             "        if (MEM_TRIGGER.test(final)) {"
+             + chr(10) + "            final = final + String.fromCharCode(10) + MEM_HINT;"
+             + chr(10) + "        }",
+             "        // local patch (MEM_LAYERS): 不再只提醒「你可以去查」，直接把相关的几条捞出来"
+             + chr(10) + "        let recallBlock = '';"
+             + chr(10) + "        if (typeof final === 'string' && final.length >= 4) {"
+             + chr(10) + "            try {"
+             + chr(10) + "                recallBlock = execFileSync('/usr/bin/python3',"
+             + chr(10) + "                    ['/opt/dsh/mem_layers.py', 'recall', '--text', final.slice(0, 200)],"
+             + chr(10) + "                    { encoding: 'utf8', timeout: 2500 }).trim();"
+             + chr(10) + "            }"
+             + chr(10) + "            catch (e) { recallBlock = ''; }"
+             + chr(10) + "        }"
+             + chr(10) + "        if (recallBlock) {"
+             + chr(10) + "            final = final + String.fromCharCode(10) + recallBlock;"
+             + chr(10) + "        }"
+             + chr(10) + "        else if (MEM_TRIGGER.test(final)) {"
+             + chr(10) + "            final = final + String.fromCharCode(10) + MEM_HINT;"
+             + chr(10) + "        }",
+             "recall 注入")
+
+    # 3) prompt.js 注入临时层摘要
+    sp = sub(sp,
+             "    const mem = readAgentsMemory();",
+             "    // local patch (MEM_LAYERS): 临时层滚动摘要（长会话被压缩后靠它接着聊）"
+             + chr(10) + "    try {"
+             + chr(10) + "        const sp = join(process.env.DSH_HOME || '/opt/dsh', 'memory', 'session_summary.md');"
+             + chr(10) + "        let sm = readFileSync(sp, 'utf8').trim();"
+             + chr(10) + "        if (sm.length > 1200)"
+             + chr(10) + "            sm = sm.slice(0, 1200) + '…';"
+             + chr(10) + "        if (sm)"
+             + chr(10) + "            platform += String.fromCharCode(10) + '[上一段对话的摘要·接着聊，不要当新话题]'"
+             + chr(10) + "                + String.fromCharCode(10) + sm + String.fromCharCode(10);"
+             + chr(10) + "    }"
+             + chr(10) + "    catch (e) { void e; }"
+             + chr(10) + "    const mem = readAgentsMemory();",
+             "摘要注入")
+
+    missing = [t for t in todo if "锚点" in t]
+    if missing:
+        return "跳过（%s）" % "、".join(missing)
+    if not todo:
+        return "已打"
+    if not apply_:
+        return "未打"
+    wr(ib, si)
+    wr(pr, sp)
+    return "已打"
+
+
+def patch_bubble_spread(apply_):
+    """长回复别压缩成长条：气泡上限 3 → 6，正常长度一句话一个气泡。
+
+    原来超过 3 句就合并回 3 条，读起来断不开（用户反馈「合并并不完整，还是分散吧」）。
+    """
+    p = os.path.join(LIB, "bridge.js")
+    s = rd(p)
+    if "parts.length > 6" in s:
+        return "已打"
+    old = """        if (parts.length > 3) {
+            const per = Math.ceil(parts.length / 3);"""
+    new = """        // local patch (BUBBLE_SPREAD): 上限 3 → 6，超出的才合并
+        if (parts.length > 6) {
+            const per = Math.ceil(parts.length / 6);"""
+    if old not in s:
+        return "跳过（找不到分句上限）"
+    if not apply_:
+        return "未打"
+    wr(p, s.replace(old, new, 1))
+    return "已打"
+
+
 PATCHES = [
     ("prompt.js  长期记忆注入", patch_prompt),
     ("bridge.js  时间后缀 + 静音系统播报", patch_bridge),
@@ -525,6 +630,8 @@ PATCHES = [
     ("cq.js      未知表情兜底成 [表情]", patch_cq),
     ("inject+bridge 注入按条 dry_run（测试不打扰主人）",
      patch_inject_per_event_dry),
+    ("mem_layers 三层记忆接线（每轮检索 + 摘要注入）", patch_mem_layers),
+    ("bridge.js 气泡上限 3→6（长回复保持分散）", patch_bubble_spread),
 ]
 
 

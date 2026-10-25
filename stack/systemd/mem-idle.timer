@@ -1,0 +1,10 @@
+[Unit]
+Description=Check every 5 minutes whether the chat has been idle >= 10 minutes
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=5min
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target
