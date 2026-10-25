@@ -12,6 +12,8 @@
   2. bridge.js   时间上下文从系统提示前缀挪到后缀（否则前缀缓存永远命中 0）
   3. inbound.js  主动接话概率门 + 主动插话提示
   4. index.js    上面两个配置键的 schema 与 gateConfig 透传
+  5. cq.js       未知表情不再兜底成笑脸
+  6. inject.js + bridge.js  注入事件带 dry_run 时只拦这一轮出站（测试不打扰主人）
 
 用法（在服务器上，以 root）：
     python3 apply_local_patches.py            # 打补丁
@@ -347,6 +349,173 @@ def patch_cq(apply_):
     wr(p, s.replace(FACE_OLD, FACE_NEW, 1))
     return "已打"
 
+def patch_inject_per_event_dry(apply_):
+    """注入可「按条」dry-run：测试消息走完整管线，但一条都不发到 QQ。
+
+    为什么需要：injectDryRun 是全局开关，可它同时是「主动消息投递」的唯一通道。
+    打开它 → 主动消息发不出去；关掉它 → 测试注入的消息会真的发到主人 QQ
+    （2026-10-26 实测：测试脚本注入 5 条假提问，她一条条回，全发出去了）。
+
+    做法（三件小事，都不动原有分支）：
+      1. 注入事件可带 "dry_run": true —— 消费时开一个 120 秒的拦截窗口；
+         异步最终回复拿不到 ALS round，所以必须靠时间窗兜住。
+      2. 拦截时往日志写一行原文：`[注入拦截] send_msg（dry_run 时间窗） :: 她本来说的话`。
+         否则只能去面板看 trace，排障抓瞎。
+      3. 注入事件可带 "as_user": true —— 不改成「系统·内部提醒」。
+         默认要把注入标成内部提醒（免得她以为主人在说话），
+         但本地测试时需要以主人身份进管线，否则她一律回「不接这条」。
+         出站已经被拦，QQ 收不到，风险只落在上下文里。
+    """
+    inj = os.path.join(LIB, "inject.js")
+    br = os.path.join(LIB, "bridge.js")
+    si = rd(inj)
+    sb = rd(br)
+    # 功能级判断：这几处都在就算打过了（线上可能被手工微调过，别用精确文本比）
+    if ("dryWindowUntil" in si and "inDryWindow" in si and "as_user" in si
+            and "[注入拦截]" in si and "真实消息进来了" in si and "PER_EVENT_DRY" in sb):
+        return "已打"
+    todo = []
+
+    def sub(text, old, new, tag, where):
+        if new in text:
+            return text
+        if old not in text:
+            todo.append(tag + "（锚点没找到）")
+            return text
+        todo.append(tag)
+        return text.replace(old, new, 1)
+
+    # 1) 字段
+    si = sub(si,
+             "    stats = { consumed: 0, skippedHistory: 0, intercepted: 0, parseErrors: 0, readFailures: 0 };",
+             "    stats = { consumed: 0, skippedHistory: 0, intercepted: 0, parseErrors: 0, readFailures: 0 };"
+             + chr(10)
+             + "    // local patch (PER_EVENT_DRY): 自带 dry_run 的注入开一个短窗口，窗口内该会话出站全拦"
+             + chr(10)
+             + "    dryWindowUntil = 0;"
+             + chr(10)
+             + "    dryWindowChats = new Set();",
+             "字段", "inject.js")
+
+    # 2) shouldIntercept + inDryWindow
+    si = sub(si,
+             "    get intercepting() {"
+             + chr(10) + "        return this.dryRun;"
+             + chr(10) + "    }",
+             "    get intercepting() {"
+             + chr(10) + "        return this.dryRun;"
+             + chr(10) + "    }"
+             + chr(10) + "    /** local patch (PER_EVENT_DRY): 这一轮要不要拦（event 级 dry_run 优先）。 */"
+             + chr(10) + "    shouldIntercept(round) {"
+             + chr(10) + "        if (round !== undefined && round.dry === true)"
+             + chr(10) + "            return true;"
+             + chr(10) + "        return this.dryRun;"
+             + chr(10) + "    }"
+             + chr(10) + "    /** local patch (PER_EVENT_DRY): 是否处在「刚有 dry_run 注入」的拦截窗口内。 */"
+             + chr(10) + "    inDryWindow(chatId) {"
+             + chr(10) + "        if (!(this.dryWindowUntil > Date.now()))"
+             + chr(10) + "            return false;"
+             + chr(10) + "        if (this.dryWindowChats.size === 0)"
+             + chr(10) + "            return true;"
+             + chr(10) + "        return chatId === undefined || this.dryWindowChats.has(chatId);"
+             + chr(10) + "    }",
+             "shouldIntercept/inDryWindow", "inject.js")
+
+    # 3) round 带 dry + 开窗
+    si = sub(si,
+             "        const round = { traceId: newTraceId(), intercepted: 0 };",
+             "        const round = { traceId: newTraceId(), intercepted: 0,"
+             + chr(10) + "            dry: Boolean(event && (event.dry_run === true || event.dryRun === true)) };"
+             + chr(10) + "        if (round.dry) {"
+             + chr(10) + "            this.dryWindowUntil = Date.now() + 120000;"
+             + chr(10) + "            const ev0 = event || {};"
+             + chr(10) + "            const cid0 = ev0.message_type === 'group'"
+             + chr(10) + "                ? ('group:' + (ev0.group_id === undefined ? '' : ev0.group_id))"
+             + chr(10) + "                : ('private:' + (ev0.user_id === undefined ? '' : ev0.user_id));"
+             + chr(10) + "            this.dryWindowChats.add(cid0);"
+             + chr(10) + "        }",
+             "round.dry + 开窗", "inject.js")
+
+    # 4) as_user
+    si = sub(si,
+             "            if (ev && (ev.post_type === 'message')) {",
+             "            // local patch (PER_EVENT_DRY): as_user=true 时不改标（本地测试用）"
+             + chr(10) + "            if (ev && (ev.post_type === 'message') && ev.as_user !== true) {",
+             "as_user", "inject.js")
+
+    # 5) 拦截日志（带原文）
+    si = sub(si,
+             "    intercept(round, action, params) {"
+             + chr(10) + "        this.stats.intercepted += 1;",
+             "    intercept(round, action, params) {"
+             + chr(10) + "        // local patch (PER_EVENT_DRY): 日志写原文，方便验证「测试没发到 QQ」"
+             + chr(10) + "        try {"
+             + chr(10) + "            const why = round !== undefined && round.dry === true ? 'per-event dry_run'"
+             + chr(10) + "                : (round === undefined ? 'dry_run 时间窗' : '全局 dry-run');"
+             + chr(10) + "            let txt = '';"
+             + chr(10) + "            try { txt = String(outboundTextOf(params) || '').replace(/\\s+/g, ' ').slice(0, 300); }"
+             + chr(10) + "            catch (e) { void e; }"
+             + chr(10) + "            this.opts.log('info', '[注入拦截] ' + action + '（' + why + '） :: ' + txt);"
+             + chr(10) + "        }"
+             + chr(10) + "        catch (e) { void e; }"
+             + chr(10) + "        this.stats.intercepted += 1;",
+             "拦截日志", "inject.js")
+
+    # 6) bridge 闸门：非全局 dry-run 时按条/按窗拦截
+    sb = sub(sb,
+             "        if (inject === undefined || !inject.intercepting || !isWriteAction(action)) {"
+             + chr(10) + "            return this.deps.connection.call(action, params);"
+             + chr(10) + "        }"
+             + chr(10) + "        const alsRound = currentInjectRound();",
+             "        if (inject === undefined || !isWriteAction(action)) {"
+             + chr(10) + "            return this.deps.connection.call(action, params);"
+             + chr(10) + "        }"
+             + chr(10) + "        const alsRound = currentInjectRound();"
+             + chr(10) + "        // local patch (PER_EVENT_DRY): 全局 dry-run 没开时，单条注入仍可自带 dry_run"
+             + chr(10) + "        if (!inject.intercepting) {"
+             + chr(10) + "            if (alsRound !== undefined && inject.shouldIntercept(alsRound))"
+             + chr(10) + "                return inject.intercept(alsRound, action, params);"
+             + chr(10) + "            if (inject.inDryWindow(chatId))"
+             + chr(10) + "                return inject.intercept(undefined, action, params);"
+             + chr(10) + "            return this.deps.connection.call(action, params);"
+             + chr(10) + "        }",
+             "bridge 闸门", "bridge.js")
+
+    # 7) 真实消息进来就关窗，免得测试期间把主人的对话也拦掉
+    si = sub(si,
+             "    noteDispatch(chatId) {"
+             + chr(10) + "        const round = currentInjectRound();"
+             + chr(10) + "        if (round !== undefined)"
+             + chr(10) + "            this.activeRounds.set(chatId, round);"
+             + chr(10) + "        else"
+             + chr(10) + "            this.activeRounds.delete(chatId);"
+             + chr(10) + "    }",
+             "    noteDispatch(chatId) {"
+             + chr(10) + "        const round = currentInjectRound();"
+             + chr(10) + "        if (round !== undefined)"
+             + chr(10) + "            this.activeRounds.set(chatId, round);"
+             + chr(10) + "        else {"
+             + chr(10) + "            this.activeRounds.delete(chatId);"
+             + chr(10) + "            // local patch (PER_EVENT_DRY): 真实消息进来了 → 立刻关掉测试拦截窗口"
+             + chr(10) + "            this.dryWindowChats.delete(chatId);"
+             + chr(10) + "            if (this.dryWindowChats.size === 0)"
+             + chr(10) + "                this.dryWindowUntil = 0;"
+             + chr(10) + "        }"
+             + chr(10) + "    }",
+             "真实消息关窗", "inject.js")
+
+    missing = [t for t in todo if "锚点" in t]
+    if missing:
+        return "跳过（%s）" % "、".join(missing)
+    if not todo:
+        return "已打"
+    if not apply_:
+        return "未打"
+    wr(inj, si)
+    wr(br, sb)
+    return "已打"
+
+
 PATCHES = [
     ("prompt.js  长期记忆注入", patch_prompt),
     ("bridge.js  时间后缀 + 静音系统播报", patch_bridge),
@@ -354,6 +523,8 @@ PATCHES = [
     ("inbound.js 主动接话概率门", patch_inbound),
     ("index.js   配置 schema + 透传", patch_index),
     ("cq.js      未知表情兜底成 [表情]", patch_cq),
+    ("inject+bridge 注入按条 dry_run（测试不打扰主人）",
+     patch_inject_per_event_dry),
 ]
 
 
