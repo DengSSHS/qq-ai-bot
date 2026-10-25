@@ -192,6 +192,15 @@ else
     systemctl daemon-reload
     ok "systemd 单位已安装"
   fi
+  # unit 里的 EnvironmentFile 指向这两个文件，缺任何一个服务都起不来。
+  # 实测（2026-10-26）：全新机只有 qwen.env，tokenhub.env 缺失 →
+  # "Failed to load environment files" → 服务无限 auto-restart。
+  [ -f "$DSH_HOME/qwen.env" ] || warn "$DSH_HOME/qwen.env 不存在（模型 key 没写？）"
+  [ -f "$DSH_HOME/tokenhub.env" ] || {
+    printf '# 可选：备用线路 key\n' > "$DSH_HOME/tokenhub.env"
+    chmod 600 "$DSH_HOME/tokenhub.env"
+    ok "补建 tokenhub.env（unit 依赖它，没有会起不来）"
+  }
   if systemctl restart dsh-onebot 2>/dev/null; then
     sleep 12
     systemctl is-active --quiet dsh-onebot && ok "dsh-onebot 已重启" \

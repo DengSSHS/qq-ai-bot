@@ -77,8 +77,16 @@ CUR_COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo '?')"
 CUR_VER="$(cat VERSION 2>/dev/null || echo '?')"
 
 # ── 查更新 ─────────────────────────────────────────────────────────────
-if ! git fetch --quiet origin 2>>"$LOG"; then
-  log "检查失败：git fetch 没成功（网络问题？），保持现状"
+# 国内到 github 经常抽（实测：一次成功一次 timeout），必须重试；
+# 实在不行用镜像（可用 REMOTE_URL 覆盖仓库 remote）。
+FETCH_OK=0
+for attempt in 1 2 3; do
+  if git fetch --quiet --prune origin 2>>"$LOG"; then FETCH_OK=1; break; fi
+  log "第 $attempt 次 git fetch 失败，10 秒后重试"
+  sleep 10
+done
+if [ "$FETCH_OK" != "1" ]; then
+  log "检查失败：连续 3 次 git fetch 不成功（网络问题？），保持现状不动"
   exit 0
 fi
 
@@ -145,12 +153,24 @@ fi
 # ── 更新后自检 ─────────────────────────────────────────────────────────
 sleep 5
 FAILED=""
+WARN_ONLY=""
 systemctl is-active --quiet dsh-onebot || FAILED="dsh-onebot 没起来"
 if [ -z "$FAILED" ] && [ -n "$PY" ] && [ -f "$BASE/qqguard.py" ]; then
   out="$("$PY" "$BASE/qqguard.py" --status 2>/dev/null | head -1)"
   case "$out" in
-    *断开*) FAILED="QQ 未连接（$out）" ;;
+    *断开*)
+      # QQ 未连接分两种：没登录（环境状态，不怪代码）/ 登录了但掉了（真故障）。
+      # 没登录时回滚毫无意义，反而会把刚升上去的好代码退回去。
+      if ls /opt/qqbot/data/config/onebot11_*.json >/dev/null 2>&1; then
+        FAILED="QQ 掉线了（$out）"
+      else
+        WARN_ONLY="QQ 还没登录（这台机器没扫码），不算更新失败"
+      fi
+      ;;
   esac
+fi
+if [ -n "$WARN_ONLY" ]; then
+  log "自检：$WARN_ONLY"
 fi
 
 if [ -n "$FAILED" ]; then
