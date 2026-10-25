@@ -130,7 +130,15 @@ if scan 'sk-[A-Za-z0-9]{20,}'; then fail "possible API key"; else pass "no API k
 if scan 'BEGIN [A-Z ]*PRIVATE KEY'; then fail "private key found"; else pass "no private key"; fi
 if scan 'accessToken:[[:space:]]*"[0-9a-f]{20,}"'; then fail "hardcoded accessToken"; else pass "no hardcoded token"; fi
 if scan 'maas\.qianwen|api\.siliconflow\.cn/sk-'; then fail "private endpoint leaked"; else pass "no private endpoint"; fi
-if [ -e deploy.env ]; then fail "deploy.env must not be committed"; else pass "deploy.env absent"; fi
+# deploy.env 是运行时参数文件（deploy.sh 里 cp example -> deploy.env 再 install.sh 读它），
+# 在部署目录里它本来就该存在。这条检查的意图是「别提交进版本库」，所以判 git 跟踪，不判文件存在。
+if git ls-files --error-unmatch deploy.env >/dev/null 2>&1; then
+  fail "deploy.env 被纳入版本控制（不该提交）"
+elif [ -e deploy.env ]; then
+  pass "deploy.env 存在但未纳入版本控制（正常）"
+else
+  pass "deploy.env 不存在（首次部署需从 deploy.env.example 复制）"
+fi
 
 # ── 7. 文档一致性 ──────────────────────────────────────────────
 sec "7. doc consistency"

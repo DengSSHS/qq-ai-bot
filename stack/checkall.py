@@ -12,8 +12,13 @@ import subprocess
 import sys
 import urllib.request
 
-OK, BAD, WARN = [], [], []
+OK, BAD, WARN, SKIP = [], [], [], []
 SEC = []
+
+
+# 「从未扫码登录」= 容器里还没有 onebot11_<QQ>.json。
+# 这台机器还没到"能检查登录态"的阶段，相关项应该 skip 而不是 bad。
+FRESH = not __import__("glob").glob("/opt/qqbot/data/config/onebot11_*.json")
 
 
 def sec(name):
@@ -35,6 +40,16 @@ def bad(msg, extra=""):
 def warn(msg, extra=""):
     WARN.append(msg)
     print("  [WARN] %s%s" % (msg, ("  " + extra) if extra else ""))
+
+
+def skip(msg, extra=""):
+    """这一项次不检查（还没到能检查的状态），不算失败也不是警告。
+
+    例：还没扫码登录，就没法检查 OneBot 连接/QQ 号/模型实测——
+    以前这些会报 FAIL，让全新机器看起来"体检全红"，其实什么都没坏。
+    """
+    SKIP.append(msg)
+    print("  [SKIP] %s%s" % (msg, ("  " + extra) if extra else ""))
 
 
 def sh(cmd, timeout=60):
@@ -83,7 +98,7 @@ def listen(addr, port):
 if listen("0.0.0.0:8643", 8643):
     ok("8643 OneBot 反向 WS 在监听")
 else:
-    bad("8643 未监听")
+    (skip if FRESH else bad)("8643 未监听（还没扫码登录，跳过）" if FRESH else "8643 未监听")
 
 # LLM 转发层：强制关思考，缺了它会慢 4~5 倍
 if listen("127.0.0.1:8890", 8890):
@@ -168,7 +183,7 @@ _got = onebot_field("botQQ")
 if _got and re.fullmatch(r"\d{5,12}", _got):
     ok("QQ botQQ = %s（格式正常）" % _got)
 else:
-    bad("QQ botQQ 异常：%r" % _got)
+    (skip if FRESH else bad)("QQ botQQ 未就绪（还没扫码）" if FRESH else "QQ botQQ 异常：%r" % _got)
 
 for k, v in qq.items():
     got = onebot_field(k)
@@ -233,7 +248,7 @@ try:
     mode = st.get("mode")
     (ok if mode in ("chat", "full") else bad)("工具档位：%s" % mode)
 except Exception:
-    bad("读不到 toolmode.state")
+    warn("读不到 toolmode.state（还没切过档位，正常）")
 rc, out, _ = sh("systemctl is-active toolmode.path")
 (ok if out == "active" else bad)("toolmode.path 监听: %s" % out)
 info = read("/opt/dsh/profiles/web/node_modules/local-memory/cordis.patch.yml")
@@ -341,7 +356,7 @@ if os.path.exists(idx):
     except Exception as e:
         bad("表情索引解析失败: %s" % e)
 else:
-    bad("缺 stickers.json")
+    (skip if FRESH else bad)("缺 stickers.json（表情库还没建，跳过）" if FRESH else "缺 stickers.json")
 
 # ---------------- 9. 定时与作息 ----------------
 sec("9. 定时器与作息")
@@ -454,7 +469,7 @@ for pat, label in (("profiles/web/cordis.patch.yml.bak-*", "配置"),
 # ---------------- 总结 ----------------
 print()
 print("=" * 62)
-print(" 失败 %d 项，警告 %d 项" % (len(BAD), len(WARN)))
+print(" 失败 %d 项，警告 %d 项，未验证 %d 项" % (len(BAD), len(WARN), len(SKIP)))
 if BAD:
     print(" 需要修：")
     for b in BAD:
@@ -463,5 +478,9 @@ if WARN:
     print(" 提醒：")
     for w in WARN:
         print("   - " + w)
+if SKIP:
+    print(" 未验证（还没到能检查的阶段，不是故障）：")
+    for k in SKIP:
+        print("   - " + k)
 print("=" * 62)
 sys.exit(1 if BAD else 0)

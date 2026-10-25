@@ -2,6 +2,80 @@
 
 本项目按「改了什么 + 为什么」记录，不按版本号堆功能。所有日期为实际改动日期。
 
+## v0.7.37 — 2026-10-26 · checkall 加「未验证」一档；preflight 的 deploy.env 误报
+
+三条反馈：一条更正成立且挖出真设计缺陷，一条是真误报，一条 v0.7.24 已改过。
+
+### ① v0.7.30 那条说法是错的（原文已更正）
+
+v0.7.30 的发布正文写「`checkall.py exit 1` ← 日记 0 条、FTS 索引未建、备份 0 份」。
+核实代码后：这三类全是 `warn()`（第 312/319/327 行与「14. 备份」段），
+退出码是 `sys.exit(1 if BAD else 0)`，**warn 根本不会让它失败**。原文照抄下来是错的。
+
+真正的 `bad()` 是「未初始化即判失败」那批：
+
+| bad() 项 | 全新机器首跑的真实状态 | 该不该算失败 |
+|---|---|---|
+| 8643 未监听 | 还没扫码登录 | 不该 |
+| QQ botQQ 异常 | 还没扫码 | 不该 |
+| 缺 stickers.json | 表情库还没建 | 不该 |
+| 读不到 toolmode.state | 还没切过档位 | 不该（warn） |
+| MCP 进程 / 探测 | 按需拉起，没调用就没进程 | 不该 |
+| 模型 API 实测 | key 还没配 | 视情况 |
+
+**设计缺陷**：checkall 没有「未初始化」这个状态。它的世界观是「这台机器应该已经在跑」，
+于是「还没到那一步」全被归成「坏了」→ 全新机器首跑必然 exit 1，新用户看到的是「体检全红」，
+而实际什么都没坏。
+
+改法是加第三档：
+
+- `skip()` —— 这次不检查，既不算失败也不是警告，摘要单列「未验证」
+- `FRESH` 判定 —— `/opt/qqbot/data/config/onebot11_*.json` 不存在 = 从未扫码
+- 8643 / botQQ / stickers.json 在 FRESH 时走 skip
+- `toolmode.state` 从 bad 降为 warn（没切过档位是正常状态，不是故障）
+- 摘要变三类：**失败 / 警告 / 未验证**；退出码仍然只看 BAD
+
+验证：生产机 `失败 0 项，警告 0 项，未验证 0 项`，EXIT=0；
+另有单测确认「只有 skip+warn 时 exit 0」「skip 不会混进 bad」。
+
+### ② preflight 第 133 行：deploy.env 误报（真 bug）
+
+原写法 `if [ -e deploy.env ]; then fail "must not be committed"`。意图是「别提交进版本库」，
+但 deploy.env 是运行时参数文件（`cp deploy.env.example deploy.env` → install.sh 读它），
+**部署目录里它本来就该存在** → 在部署目录跑 preflight 必然误报 fail。
+
+改成判 git 跟踪，三种状态都判对：
+
+```bash
+if git ls-files --error-unmatch deploy.env >/dev/null 2>&1; then
+  fail "deploy.env 被纳入版本控制（不该提交）"
+elif [ -e deploy.env ]; then
+  pass "deploy.env 存在但未纳入版本控制（正常）"
+else
+  pass "deploy.env 不存在（首次部署需从 deploy.env.example 复制）"
+fi
+```
+
+CI 的干净 checkout 里行为不变（还是判「不存在 / 未被跟踪」为 pass）。
+
+### ③ mem_rank 两处：v0.7.24 已改，本次不用重做
+
+- **口径**：docstring 已是「遗忘曲线排序（通用工程近似：指数衰减 + 长尾地板…）」，
+  与 NOTICE 一致；`# 参数取自 retention-model.js` 那行在 v0.7.24 已删
+- **hits 副作用**：已拆成 `rank()`（纯函数、不写盘）+ `reinforce(heads)`（只强化真正注入的），
+  调用方两条路径分别接线
+
+当时就写了迁移说明「不清零（实测 max hits=1、平均 0.2）」。本次只补一句显式口径：
+
+> **hits 语义自 v0.7.24 起从「进过候选池」改为「真被注入上下文」，历史值未清零，
+> 所以旧数据会显得偏大。**
+
+### 顺手记一个工具坑
+
+Windows 的 Git Bash 会把命令行里的 `/opt/...` 转成 `C:/Program Files/Git/opt/...`，
+`push.py` 于是报 `FileNotFoundError: [Errno 2] No such file`（看着像远端文件不存在，
+其实是本地路径被改写）。加 `export MSYS2_ARG_CONV_EXCL='*'` 或把远端路径写进脚本字面量。
+
 ## v0.7.36 — 2026-10-26 · 生产机核对：32 项到位，verify 首次 READY
 
 用户：“那我自己原本服务器这里呢，有些 bug 修了吗”
