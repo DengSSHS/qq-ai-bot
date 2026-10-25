@@ -22,6 +22,16 @@ SEC = []
 FRESH = not __import__("glob").glob("/opt/qqbot/data/config/onebot11_*.json")
 
 
+def _count_write():
+    try:
+        rc, out, _err = sh("python3 /opt/dsh/capabilities.py --json", timeout=60)
+        import json as _j
+        rows = _j.loads(out or "[]")
+        return sum(1 for r in rows if r.get("kind") == "write")
+    except Exception:
+        return 0
+
+
 def sec(name):
     SEC.append(name)
     print()
@@ -520,6 +530,23 @@ try:
             warn("发送失败 %d 条（多数是重启瞬间的 transport stopped）" % c["fail"])
 except Exception as e:
     warn("读不到发送审计：%s" % e)
+
+# ---------------- 16. 能力注册表 ----------------
+sec("16. 能力注册表")
+try:
+    rc, out, _err = sh("python3 /opt/dsh/capabilities.py --check", timeout=60)
+    miss = [ln for ln in (out or "").split(chr(10)) if ln.startswith("[MISS]")]
+    total = [ln for ln in (out or "").split(chr(10)) if ln.startswith("[OK]") or ln.startswith("[MISS]")]
+    if not total:
+        warn("能力注册表没输出（capabilities.py 跑不起来？）")
+    elif miss:
+        bad("能力未接线 %d/%d 项" % (len(miss), len(total)))
+        for ln in miss[:6]:
+            bad(ln.replace("[MISS]", "").strip()[:110])
+    else:
+        ok("能力接线正常（%d 项，含写操作 %d 项）" % (len(total), _count_write()))
+except Exception as e:
+    warn("能力注册表校验失败：%s" % e)
 
 # ---------------- 总结 ----------------
 print()

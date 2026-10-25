@@ -86,25 +86,29 @@ sendGateway({ chatId, segments, source, dryRun }) →
 
 ---
 
-## ④ 能力/风险注册表 🟡（部分）
+## ④ 能力/风险注册表 ✅（2026-10-26 已上线）（部分）
 
 **现状**：`panel_api.py` 已有 28 个 def（四类：参数/开关/文本/操作），`toolmode.py` 有 chat/full 两档，
 但没有"能力清单 + 风险分级"的统一表；新能力容易"写了但没接"。
 
-**最小可做**：一张 `capabilities.toml`（或 `panel_api.py` 里的 REGISTRY 常量）：
+**已实现** `capabilities.py`：31 项能力，每项登记
 
-```toml
-[[cap]]
-id = "qq.emoji_like"
-kind = "write"          # read | write
-risk = "low"            # low | medium | high
-default = true
-mode = "chat"           # chat | full
-verify = "checkall:tool_qq_emoji_like"
+```
+id / kind(read|write) / risk(low|medium|high) / mode(chat|full) / default / file+marker
 ```
 
-**收益**：面板直接渲染；checkall 能校验"注册的能力是否真的可用"；
-新增能力不会静默失效（`verify` 字段跑一遍）。
+`file+marker` 就是"接对了没有"的判据——能在那个文件里找到那个标记，才算接线成功。
+（"代码在 ≠ 接对了"：这个项目里已经踩过两次，补丁写了但锚点不匹配。）
+
+```bash
+python3 capabilities.py            # 表格 + 统计
+python3 capabilities.py --check    # 只校验（未接线返回 1）
+python3 capabilities.py --json     # 给面板用
+```
+
+实测：**31 项：read=11 write=20｜high=2 low=22 medium=7｜未接线 0**
+
+checkall 第 16 段直接调它，未接线项当场 FAIL。
 
 ---
 

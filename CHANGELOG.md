@@ -2,6 +2,44 @@
 
 本项目按「改了什么 + 为什么」记录，不按版本号堆功能。所有日期为实际改动日期。
 
+## v0.9.5 — 2026-10-26 · 能力/风险注册表（第 4 条）
+
+31 项能力，一张表回答四个问题：叫什么、读还是写、风险多高、**真的接上了吗**。
+
+### 表长什么样
+
+```
+id / kind(read|write) / risk(low|medium|high) / mode(chat|full) / default / file+marker
+```
+
+`file+marker` 是"接对了没有"的判据：能在那个文件里找到那个标记才算接线成功。
+这条针对的是本项目反复踩的坑——**补丁写了、锚点却没匹配**（v0.9.3 就为这个折腾了三轮）。
+
+```bash
+python3 capabilities.py            # 表格 + 统计
+python3 capabilities.py --check    # 只校验（未接线返回 1）
+python3 capabilities.py --json     # 给面板用
+```
+
+实测：
+
+```
+共 31 项：read=11 write=20｜high=2 low=22 medium=7｜未接线 0
+```
+
+两个 high 风险项点名：`qq.napcat_api`（白名单代理）、`bili.share_to_owner`
+（真的会在 B 站评论区 @ 主人）。
+
+### 接进体检
+
+checkall 第 16 段调 `--check`：未接线当场 FAIL，接线正常输出
+`能力接线正常（31 项，含写操作 20 项）`。
+
+### 顺带
+
+- 文档 `docs/architecture.md` 的 ④ 状态更正为已做
+- 六条进度：① ✅ ② ✅ ③ 🟡 ④ ✅ ⑤ 🟡 ⑥ ✅
+
 ## v0.9.4 — 2026-10-26 · 写操作统一过闸（第 2 条的正身）
 
 上一版只做了审计（看清发没发），这版把**出口真正收成一道闸**。
