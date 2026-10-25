@@ -30,6 +30,7 @@ import sys
 BASE = os.environ.get("DSH_HOME", "/opt/dsh")
 REPO = os.environ.get("REPO_DIR", "")
 MANIFEST = os.path.join(BASE, "memory", "deploy-manifest.json")
+CONFLICTS = os.path.join(BASE, "memory", "deploy-conflicts.json")
 
 # 只同步这些模式（仓库 stack/ → /opt/dsh/）
 PATTERNS = (".py", ".sh")
@@ -75,6 +76,56 @@ def save_manifest(d):
     os.replace(tmp, MANIFEST)
 
 
+def notify_conflicts(conflicts):
+    """把冲突告诉使用者（同一次冲突只提醒一次，不重复刷屏）。"""
+    if not conflicts:
+        return
+    sig = "|".join("%s:%s" % (n, h[:8]) for n, h in sorted(conflicts))
+    try:
+        with open(CONFLICTS, encoding="utf-8") as f:
+            prev = json.load(f).get("sig", "")
+    except Exception:
+        prev = ""
+    if prev == sig:
+        return  # 同一个冲突已经提醒过了
+
+    names = ", ".join(n for n, _ in conflicts[:6])
+    more = "" if len(conflicts) <= 6 else " 等 %d 个" % len(conflicts)
+    subject = "更新时发现 %d 个文件被你改过（未覆盖）" % len(conflicts)
+    body = (
+        "这些文件你（或使用者）改过，更新时保留了你的版本，没有覆盖：\n\n"
+        + "\n".join("  - %s" % n for n, _ in conflicts[:12])
+        + ("\n  …还有 %d 个" % (len(conflicts) - 12) if len(conflicts) > 12 else "")
+        + "\n\n新版本已经放在同目录的「文件名.new」里，你可以：\n"
+        "  1. 什么都不做 —— 继续用自己的版本（下次更新还会这样提示，但只提醒一次）\n"
+        "  2. 用新版 —— 把 .new 覆盖过去\n"
+        "  3. 先看差异 —— diff -u 文件名 文件名.new\n\n"
+        "提醒：改插件（node_modules）请用 apply_local_patches.py，那个不会被更新冲掉。"
+    )
+    sent = False
+    try:
+        import subprocess
+        py = sys.executable or "python3"
+        r = subprocess.run([py, os.path.join(BASE, "notify.py"), subject, body],
+                           timeout=60, check=False, capture_output=True)
+        sent = (r.returncode == 0)
+        if not sent:
+            err = (r.stderr or b"").decode("utf-8", "replace")[:200]
+            print("  (提醒没发出去，下次更新会再试：%s)" % err.strip())
+    except Exception as e:
+        print("  (提醒发送异常，下次更新会再试：%s)" % e)
+
+    # 只有真的发出去了才记“已提醒”。否则没发出去却不再提醒，等于把话吞了。
+    if sent:
+        try:
+            os.makedirs(os.path.dirname(CONFLICTS), exist_ok=True)
+            with open(CONFLICTS, "w", encoding="utf-8") as f:
+                json.dump({"sig": sig, "files": [n for n, _ in conflicts]}, f,
+                          ensure_ascii=False, indent=1)
+        except Exception:
+            pass
+
+
 def main():
     check_only = "--check" in sys.argv
     adopt = "--adopt" in sys.argv
@@ -90,6 +141,7 @@ def main():
     new_manifest = dict(manifest)
 
     stats = {"新增": [], "更新": [], "保留本地改动": [], "已是最新": [], "无变化": []}
+    conflicts = []
 
     for name in sorted(os.listdir(src_dir)):
         if not name.endswith(PATTERNS):
@@ -129,6 +181,7 @@ def main():
             new_manifest[name] = disk_hash
             stats["保留本地改动"].append(name +
                                        "（无基线，已保守处理；确认后可 --adopt）")
+            conflicts.append((name, new_hash))
         else:
             # 别人改过，且新版也不同 → 绝不覆盖
             if force:
@@ -140,6 +193,7 @@ def main():
                 if not check_only:
                     shutil.copy2(src, dst + ".new")
                 stats["保留本地改动"].append(name)
+                conflicts.append((name, new_hash))
 
     if not check_only:
         save_manifest(new_manifest)
@@ -157,6 +211,11 @@ def main():
         print("     想合并：diff -u %s %s.new" % (stats["保留本地改动"][0],
                                                  stats["保留本地改动"][0]))
         print("     想让当前内容成为新基线（以后按它比对）：--adopt")
+
+    # 冲突要主动告诉使用者（同一次冲突只提醒一次，避免每次跑都刷屏）
+    if conflicts and not check_only:
+        notify_conflicts(conflicts)
+
     if not any(stats[k] for k in stats if k != "无变化"):
         print("脚本无需同步（%d 个文件已是仓库版本）" % len(stats["无变化"]) + str(len(stats["已是最新"])))
     return 0
