@@ -2,6 +2,33 @@
 
 本项目按「改了什么 + 为什么」记录，不按版本号堆功能。所有日期为实际改动日期。
 
+## v0.7.29 — 2026-10-25 · 重装/更新不再冲掉别人的设定
+
+上一版做了 `update.sh` 的三方比对，但漏了一条更常用的路径：**`install.sh` 自己就在覆盖**——
+`cp -f stack/*.py` 无条件覆盖脚本，`sed tpl > cordis.patch.yml` 整份重写配置。
+而 `deploy.sh` 失败后文档就是让人“重跑”，正好踩这个坑。
+
+- 第 6 步：只拷“目标不存在”的文件，已存在的走三方比对（改过就保留 + `.new`）
+- 第 7.2 步：配置已存在则**只补缺失的键**，用户调过的值一字不改
+
+实测（干净机重跑 install.sh，先手工改两处设定 + 给 proactive.py 追加一行）：
+
+```
+[OK] cordis.patch.yml 已合并（保留你原有的设定，只补新键）
+     新增配置键：（无）
+     groupActivationMinutes: 25   ← 保住
+     casualEngageRate: 0.55       ← 保住
+     stickerNudgeRate: 0.6        ← 新键补上
+proactive.py → 保留原样，新版放 proactive.py.new；自定义行数 1 → 1
+```
+
+顺带修：`sync_scripts.py` 只认固定路径，实际部署常在 `~/qq-ai-bot`，
+改为 `REPO_DIR` 显式传仓库位置。
+
+保护矩阵：脚本（三方比对）/ cordis.patch.yml（只补键）/ routines.json（只加新项）/
+persona.md（存在不动）/ *.conf.json（不同步）—— `node_modules` 不保护，
+改用 `apply_local_patches.py`。
+
 ## v0.7.28 — 2026-10-25 · 干净机端到端验证：抓出四个真 bug
 
 用一台按小时计费的干净 Ubuntu 24.04（2 核 1.9G，默认 `ubuntu` 账号）从零跑

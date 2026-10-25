@@ -205,7 +205,22 @@ fi
 # ── 6. 代码与目录 ─────────────────────────────────────────────────────
 phase "6/9 部署代码到 $DSH_HOME"
 mkdir -p "$DSH_HOME"/{media/onebot,memory,workspace,sessions,storages,profiles/web}
-cp -f "$STACK"/*.py "$STACK"/*.sh "$STACK"/*.json "$DSH_HOME"/ 2>/dev/null
+# 只拷"目标不存在"的文件；已存在的走三方比对，绝不覆盖用户改过的脚本。
+# （以前是 cp -f 无条件覆盖，重跑 install.sh 会把别人的改动冲掉）
+if [ -f "$STACK/sync_scripts.py" ] && [ -d "$DSH_HOME" ]; then
+  bash -c '
+    set -e
+    for f in "'"$STACK"'"/[a-zA-Z0-9_]*.py "'"$STACK"'"/[a-zA-Z0-9_]*.sh "'"$STACK"'"/[a-zA-Z0-9_]*.json; do
+      [ -f "$f" ] || continue
+      t="'"$DSH_HOME"'/$(basename "$f")"
+      [ -e "$t" ] || cp -f "$f" "$t"
+    done
+  '
+  # REPO_DIR 告诉它仓库在哪（安装时仓库可能在 ~/qq-ai-bot，不在固定路径里）
+  REPO_DIR="$(cd "$STACK/.." && pwd)" python3 "$STACK/sync_scripts.py" 2>&1 | tail -6 || warn "脚本同步有问题（已保留你改过的文件）"
+else
+  cp -f "$STACK"/*.py "$STACK"/*.sh "$STACK"/*.json "$DSH_HOME"/ 2>/dev/null
+fi
 rm -f "$DSH_HOME/profile-package.json"
 chmod +x "$DSH_HOME"/*.sh 2>/dev/null
 # 记下基线（哈希），以后 update.sh 靠它区分「没人动过」和「使用者自己改过」。
@@ -213,7 +228,7 @@ chmod +x "$DSH_HOME"/*.sh 2>/dev/null
 if [ -f "$STACK/sync_scripts.py" ]; then
   # 注意：install.sh 里没有 $PY 变量（那是 update.sh 的），必须写死 python3，
   # 否则 set -u 下直接 unbound variable 崩掉（2026-10-25 干净机实测）。
-  python3 "$STACK/sync_scripts.py" --adopt >/dev/null 2>&1 || warn "基线记录失败（不影响使用，更新时会保守处理）"
+  REPO_DIR="$(cd "$STACK/.." && pwd)" python3 "$STACK/sync_scripts.py" --adopt >/dev/null 2>&1 || warn "基线记录失败（不影响使用，更新时会保守处理）"
 fi
 # 脚本里的占位符也要替换（checkall.py / audit.sh 里写死了 botQQ 和主人 QQ）
 for f in "$DSH_HOME"/*.py "$DSH_HOME"/*.sh; do
@@ -297,14 +312,59 @@ else
 fi
 
 # 7.2 cordis.patch.yml（模板里所有占位符都必须被替换，漏一个就起不来）
+CFG="$DSH_HOME/profiles/web/cordis.patch.yml"
+mkdir -p "$(dirname "$CFG")"
+TMPCFG="$(mktemp)"
 sed -e "s|__LLM_BASE_URL__|${LLM_BASE_URL}|g" \
     -e "s|__LLM_MODEL__|${LLM_MODEL}|g" \
     -e "s|__WS_TOKEN__|${WS_TOKEN}|g" \
     -e "s|__BOT_QQ__|${BOT_QQ}|g" \
     -e "s|__OWNER_QQ__|${OWNER_QQ}|g" \
-    "$STACK/cordis.patch.yml.tpl" > "$DSH_HOME/profiles/web/cordis.patch.yml"
-grep -q "__" "$DSH_HOME/profiles/web/cordis.patch.yml" && die "配置文件里还有没替换的占位符"
-ok "cordis.patch.yml 写好"
+    "$STACK/cordis.patch.yml.tpl" > "$TMPCFG"
+grep -q "__" "$TMPCFG" && die "模板里还有没替换的占位符"
+
+if [ -f "$CFG" ]; then
+  # 已存在：只补新版本新增的键，**用户调过的值一个字不改**
+  # （作息时段、接话概率、开关……全在这个文件里，整份重写等于把设定清零）
+  python3 - "$CFG" "$TMPCFG" <<'MERGEPY'
+import io, re, sys
+cfg_p, tpl_p = sys.argv[1], sys.argv[2]
+cfg = io.open(cfg_p, encoding="utf-8").read().split("\n")
+tpl = io.open(tpl_p, encoding="utf-8").read().split("\n")
+
+def key_of(line):
+    m = re.match(r"^(\s*)([A-Za-z_][A-Za-z0-9_]*):", line)
+    return (m.group(2), len(m.group(1))) if m else (None, None)
+
+present = {key_of(l)[0] for l in cfg if key_of(l)[0]}
+added = []
+for i, line in enumerate(tpl):
+    k, indent = key_of(line)
+    if not k or k in present or line.lstrip().startswith("#"):
+        continue
+    block = [line]
+    j = i + 1
+    while j < len(tpl) and tpl[j].strip() and not key_of(tpl[j])[0]:
+        block.append(tpl[j]); j += 1
+    at = None
+    for idx, cl in enumerate(cfg):
+        ck, ci = key_of(cl)
+        if ck and ci == indent:
+            at = idx + 1
+    if at is None:
+        continue
+    cfg[at:at] = block
+    present.add(k)
+    added.append(k)
+io.open(cfg_p, "w", encoding="utf-8", newline="\n").write("\n".join(cfg))
+print("  新增配置键：" + (", ".join(added) if added else "（无）"))
+MERGEPY
+  ok "cordis.patch.yml 已合并（保留你原有的设定，只补新键）"
+else
+  cp -f "$TMPCFG" "$CFG"
+  ok "cordis.patch.yml 写好"
+fi
+rm -f "$TMPCFG"
 
 # 7.3 profile 依赖
 cp -f "$STACK/profile-package.json" "$DSH_HOME/profiles/web/package.json"
