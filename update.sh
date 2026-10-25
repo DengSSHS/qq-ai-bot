@@ -204,6 +204,15 @@ if [ -f "$PWD/stack/apply_local_patches.py" ]; then
     "$PY" "$PWD/stack/apply_local_patches.py" || warn "补丁应用有问题"
   fi
 fi
+# Tulpa（B站只读 MCP）的媒体选流补丁：/opt/tulpa 重装就丢，所以每次更新都补一次。
+# 丢了的表现很隐蔽：job 照样 succeeded，但字幕空、只有元数据（B站把 CDN 换到 PCDN 域名+非443端口）。
+if [ -f "$PWD/stack/patch_tulpa_media.py" ]; then
+  if [ "$DRY" = "1" ]; then
+    "$PY" "$PWD/stack/patch_tulpa_media.py" --check || true
+  else
+    "$PY" "$PWD/stack/patch_tulpa_media.py" || warn "Tulpa 选流补丁没打上（B站视频可能又只剩元数据）"
+  fi
+fi
 
 # ── 5. 重启 ────────────────────────────────────────────────────────────
 say "5/6 重启服务"

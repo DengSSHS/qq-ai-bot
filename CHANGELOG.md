@@ -2,6 +2,87 @@
 
 本项目按「改了什么 + 为什么」记录，不按版本号堆功能。所有日期为实际改动日期。
 
+## v0.7.38 — 2026-10-26 · B站读视频恢复：PCDN 回退 + 空结果降级 + 任务替她等完
+
+起因是她抱怨「搜了没读、读一半卡住、链接不合规矩工具不收、任务一直转圈还是 queued」。
+核对日志和 Tulpa 的 job 库：**现象基本属实，归因不对**。一次改完 A/B/C。
+
+### 先摆数据（10-25 20:50 ~ 10-26 01:01）
+
+- 10 次 `read_video`，job **全部 succeeded**，1.0–13.2 秒 → 没有卡在 queued
+- 但 **5/10 的结果是空的**：4×`unsafe_url`、1×`network_error`、1×`incomplete_download`
+- 只有 4 次真读到内容（50–240 条字幕）
+
+### A. 根因：B站换了 CDN，白名单把它拒了
+
+playurl 现在给的是 PCDN 地址：
+
+```
+https://b-baaa1gvj119u13vbgs9iegnauj0c.edge.mountaintoys.cn:4483/upgcxcode/...
+                                   ↑ 非白名单域名                    ↑ 非 443 端口
+```
+
+`tulpa_bilibili/net.py` 的 `validate_url(purpose='media')` 只许 443/空端口 + 白名单域名，
+于是判 `unsafe_url`，**媒体下载整体跳过**，只剩元数据；但 job 仍然 `state=succeeded`。
+
+同一响应的 `backupUrl` 是 `upos-sz-mirrorbd.bilivideo.com`（合规、443）。
+→ 选流时按 base → backup 依次尝试，取第一个能过白名单的。
+**安全边界（https / 端口 / 域名白名单 / DNS 钉死）一处没放松。**
+
+落成 `stack/patch_tulpa_media.py`（幂等、`--check` 可查），`update.sh` 与 `install.sh`
+每次都会重打一遍——因为 `/opt/tulpa` 不归这个仓库管，重装就丢，而丢了的表现很隐蔽：
+job 照样成功，只是内容空。
+
+验证（重启 Tulpa 后真跑）：
+
+```
+BV1EeHW69Eq6  之前 unsafe_url → 现在 字幕 60 条 + 帧 4   evidence=subtitles_and_frames
+BV1s9aB6YE7m  之前空壳 1KB    → 现在 帧 4              evidence=frames_only（该视频本来没字幕）
+```
+
+补丁脚本用原始备份重放，产出与线上文件**逐字节一致**（`diff -q` 通过）。
+
+### B. 空结果不许再报成功
+
+`bili_hub._read_quality()`：既没字幕也没抽到帧 → `ok:false`、`code=read_empty`，
+并把 warning 码一起返回，附一句「不算看过，别当成看过」。
+
+注意反向误判：「只有帧没有字幕」**是合法结果**（不少视频本来就没有 CC 字幕），不能算失败。
+单测覆盖了这个反例。
+
+### C. 异步任务替她等完
+
+`bili_hub.wait_job()`：`read_video` 内部最多轮询 30 秒（1.5 秒一次），超时返回 `job_timeout`。
+
+实测她 2 秒查一次、查 3~4 次就收手；21:19 那个 job 在她最后一次查询之后 **6 秒**才完成，
+结果她自己没取到，主观上就成了「等半天还是 queued」。
+
+### 顺手揪出的两个事故
+
+1. **配置里有一个会让插件整块不激活的错**（比“掉线”更值得记）。`cordis.patch.yml` 里有 3 行是
+   `值# 注释` 形式（`casualEngageRate: 0.05# 20% ...`），`#` 前少一个空格 → YAML 把 `0.05`
+   读成字符串 `"0.05# 20% ..."` → 插件 entry 校验失败 → **整块不激活**。
+   而 `systemctl is-active` 仍是 `active`、8643 端口也照样监听，表面上一切正常。
+
+   真实时间线（核对过）：错配置 00:48 就写进文件，但进程一直用旧配置运行，所以没暴露；
+   01:31 那次重启才让它生效，01:31:25–01:33:30 她确实不可用（约 2 分钟），修好后恢复。
+   也就是说——这个错可以潜伏很久，直到下一次重启才咬人。
+
+   已修，并给 checkall 加了一条检查：取最后一次 `mounted` 之后的日志，
+   有 `ValidationError` / `did not activate` 直接 FAIL。这条以后能省掉这种「全绿但掉线」。
+2. **测试脚本残留灌假消息**。`/tmp/nt.py`（一次注入 5 条假提问的测试工具）在 01:24–01:26
+   跑过一轮，她把这批当可疑消息拒答（「这个我不接」「不接这条」「在等你本人说话」），
+   连着真人的问话也一起拒。已删除残留脚本、清空注入队列、重启。
+
+### 验证
+
+```
+checkall      失败 0 项，警告 0 项，未验证 0 项    EXIT=0
+桥接          bridge ready (2 resumed chat(s)) / OneBot connected
+插件配置      插件配置校验通过（本次启动没有 ValidationError）
+读视频        BV1EeHW69Eq6 → 字幕 60 条 + 帧 4 ；BV1s9aB6YE7m → 帧 4
+```
+
 ## v0.7.37 — 2026-10-26 · checkall 加「未验证」一档；preflight 的 deploy.env 误报
 
 三条反馈：一条更正成立且挖出真设计缺陷，一条是真误报，一条 v0.7.24 已改过。

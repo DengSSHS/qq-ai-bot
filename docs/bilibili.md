@@ -101,6 +101,33 @@ dsh 的 MCP 连接是启动时建立的。关掉再开，dsh 不会重连——
 
 ---
 
+## 已知坑：B站换了 CDN，`read_video` 只剩元数据
+
+2026-10-26 实测：10 次读视频里 5 次“成功但空”——job `succeeded`、`evidence_level=metadata_only`、
+字幕 0 条、结果 1KB。原因不是网络也不是额度，是 B站开始下发 PCDN 地址：
+
+```
+https://b-baaa1gvj119u13vbgs9iegnauj0c.edge.mountaintoys.cn:4483/upgcxcode/...
+                                    ↑ 非白名单域名        ↑ 非 443 端口
+```
+
+`tulpa_bilibili/net.py` 的 `validate_url(purpose='media')` 只允许 443/空端口 + 白名单域名，
+这类地址被判 `unsafe_url`，媒体下载整个跳过（安全边界是对的，不该放宽）。
+
+**修法**：同一份 playurl 响应的 `backupUrl` 通常还有标准地址
+（`upos-sz-mirrorbd.bilivideo.com:443`），所以选流时按 base → backup 依次尝试，
+取第一个能过白名单的。落盘为 `stack/patch_tulpa_media.py`（幂等，`--check` 可查；
+`update.sh` / `install.sh` 都会重打一遍，因为 `/opt/tulpa` 不归这个仓库管）。
+
+配套两处（`bili_hub.py`）：
+
+- **空结果如实降级**：没字幕也没抽到帧 → `ok:false`、`code=read_empty`，并告诉她“不算看过”。
+  注意“只有帧没有字幕”是合法结果（有些视频本来就没 CC），不能当成失败。
+- **异步任务替她等完**：`read_video` 内部最多轮询 30 秒。实测她 2 秒查一次、查 3~4 次就放弃，
+  有个 job 在她最后一次查询之后 6 秒才完成，她自己没取到，主观上就成了“一直 queued”。
+
+---
+
 ## 部署
 
 ### 1. 装 Tulpa（Linux 终端版）

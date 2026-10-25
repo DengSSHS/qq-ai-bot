@@ -100,6 +100,19 @@ if listen("0.0.0.0:8643", 8643):
 else:
     (skip if FRESH else bad)("8643 未监听（还没扫码登录，跳过）" if FRESH else "8643 未监听")
 
+# 插件配置能不能加载：YAML 里值后面少一个空格接注释（`0.05# 说明`）就变成字符串，
+# 校验失败后整块 entry 不激活——服务 is-active 仍是 active，端口也可能在，
+# 但 QQ 完全不通（2026-10-26 实测：她离线约 40 分钟，体检全绿，没人发现）。
+rc, out, _ = sh("awk '/mounted \\(mode=/{buf=\"\"} {buf=buf $0 \"\\n\"} END{print buf}' "
+                "/var/log/dsh-onebot.log | grep -c 'ValidationError\\|did not activate'")
+try:
+    cfg_bad = int(out or 0)
+    (bad if cfg_bad else ok)(
+        "插件配置校验失败 %d 处（看 /var/log/dsh-onebot.log，她应该是掉线的）" % cfg_bad
+        if cfg_bad else "插件配置校验通过（本次启动没有 ValidationError）")
+except Exception:
+    (skip if FRESH else warn)("读不到启动日志，跳过插件配置校验")
+
 # LLM 转发层：强制关思考，缺了它会慢 4~5 倍
 if listen("127.0.0.1:8890", 8890):
     ok("8890 LLM 转发层在监听")

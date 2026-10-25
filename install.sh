@@ -411,6 +411,10 @@ if [ -x "$STACK/vendor/install_fork.sh" ]; then
     warn "没有 $VENDOR_DIR，用 registry 原版插件（本地 fork 功能不可用）"
   fi
 fi
+# Tulpa 的媒体选流补丁（B站 PCDN 地址回退到 backupUrl）——装在别的机器上时也要补。
+if [ -f "$STACK/patch_tulpa_media.py" ]; then
+  "$PY" "$STACK/patch_tulpa_media.py" || warn "Tulpa 选流补丁没打上（B站视频可能只剩元数据）"
+fi
 # npm 会把 local-memory 复制进 node_modules，**运行时读的是那一份**。
 # 只改 profiles/web/local-memory 的话，占位符照样进 MCP 配置，
 # 看图请求会发到 "__VISION_BASE__/chat/completions" —— 她从此看不见任何图片。

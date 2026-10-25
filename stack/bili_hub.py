@@ -229,6 +229,71 @@ def reply(obj):
     sys.stdout.flush()
 
 
+def _read_quality(res):
+    """读视频的结果到底能不能用——把"成功但空"如实降级。
+
+    Tulpa 在媒体下载失败时仍然返回 state=succeeded，只是字幕空、没有帧、
+    evidence_level 掉成 metadata_only（2026-10-25 实测 10 次里 5 次这样）。
+    对她来说"成功但空"最坑：她会当成自己看过了。
+
+    反过来，只有帧没有字幕是**合法**结果（有些视频本来没有字幕/CC），
+    所以 entries 和 frames 有一个就算读到了。
+    """
+    if not isinstance(res, dict) or not res.get("ok"):
+        return res
+    body = res.get("result") if isinstance(res.get("result"), dict) else res
+    if not isinstance(body, dict):
+        return res
+    if str(body.get("state") or "") not in ("", "succeeded"):
+        return res
+    entries = ((body.get("speech") or {}).get("entries")) or []
+    frames = body.get("frames") or []
+    if entries or frames:
+        return res
+    warnings = body.get("warnings") or []
+    codes = [str(w.get("code")) for w in warnings if isinstance(w, dict) and w.get("code")]
+    why = "、".join(codes) or "无字幕无画面"
+    out = dict(res)
+    out["ok"] = False
+    out["state"] = "empty"
+    out["error"] = {"code": "read_empty",
+                    "message": "这个视频没读到内容（%s），只有元数据" % why,
+                    "warnings": warnings[:4]}
+    out["note"] = ("不算看过，别当成看过。换一个视频试；"
+                   "连续两个都这样就跟主人说一声，别死磕。")
+    return out
+
+
+def wait_job(res, budget_s=30, interval=1.5):
+    """read_video 是异步任务：这里替她把排队等完，省得她手动轮询又等不及。
+
+    2026-10-25 实测：她 2 秒查一次、查 3~4 次就放弃，
+    有个 job 在她最后一次查询之后 6 秒才完成，结果她自己没取到。
+    """
+    if not isinstance(res, dict) or not res.get("ok"):
+        return res
+    job = res.get("job_id")
+    if not job or str(res.get("state") or "") not in ("queued", "running"):
+        return res
+    deadline = time.time() + budget_s
+    last = res
+    while time.time() < deadline:
+        time.sleep(interval)
+        cur = forward("get_video_job", {"job_id": job})
+        if not isinstance(cur, dict):
+            break
+        last = cur
+        if str(cur.get("state") or "") not in ("queued", "running"):
+            cur["waited_seconds"] = round(budget_s - max(0.0, deadline - time.time()), 1)
+            return cur
+    out = dict(last)
+    out["ok"] = False
+    out.setdefault("error", {"code": "job_timeout",
+                             "message": "等了 %d 秒还没跑完" % budget_s})
+    out["note"] = "还在跑就别死等，先干别的，或者跟主人说一句。"
+    return out
+
+
 def call_tool(name, args):
     if name == "bili_now":
         ok, why, left = gate()
@@ -258,6 +323,11 @@ def call_tool(name, args):
                     "note": "额度没了，别重试。可以跟主人说一声。",
                     "budget": bili_budget.status()}
         res = forward(name, args)
+        # 异步任务替她等完（C），再把"成功但空"如实降级（B）
+        if name == "read_video":
+            res = wait_job(res)
+        if name in ("read_video", "get_video_job"):
+            res = _read_quality(res)
         try:
             if isinstance(res, dict) and res.get("ok"):
                 bili_budget.record(bili_budget.estimate(res))
