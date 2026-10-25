@@ -148,10 +148,7 @@ def main():
         st = {"day": day, "fired": {}, "count": 0}
 
     idle = idle_minutes()
-    if in_quiet(now_min):
-        if dry:
-            print("静默时段（%s），不触发" % now.strftime("%H:%M"))
-        return
+    quiet_now = in_quiet(now_min)
 
     for r in cfg.get("routines", []):
         rid = r["id"]
@@ -160,6 +157,10 @@ def main():
         if r.get("off"):
             if dry:
                 print("[%s] 已停用（switch.py off）" % rid)
+            continue
+        if quiet_now and not r.get("ignoreQuiet"):
+            if dry:
+                print("[%s] 睡觉时段，不打扰（可用 ignoreQuiet 豁免）" % rid)
             continue
         ramp = float(r.get("rampPerHour", 0) or 0)
 
@@ -175,9 +176,13 @@ def main():
             cap = float(r.get("rampCap", 0.8))
             hours = max(0.0, (idle - need_min) / 60.0)
             mult = slot_mult(now_min)
-            # 时段决定"这个时段最多可能多主动"（天花板），累积决定"这次有没有想起你"。
-            # 写成 cap*mult 而不是 ramp*mult：否则闲置一久，时段差异会被 (1+hours) 抹平。
-            prob = min(cap * mult, ramp * (1 + hours))
+            # 模型要点：她本来就有"想说话"的冲动（base 不为 0），
+            # 空闲只是加成 —— 而不是"你不理我越久我越急"。
+            base = float(r.get("baseChance", 0.06))
+            bonus_per_h = float(r.get("idleBonusPerHour", 0.05))
+            bonus_cap = float(r.get("idleBonusCap", 0.30))
+            idle_bonus = min(bonus_cap, bonus_per_h * hours)
+            prob = min(cap, max(0.0, (base + idle_bonus) * mult))
             hour_bucket = now.strftime("%Y-%m-%dT%H")
             h = int(hashlib.sha256((hour_bucket + rid).encode()).hexdigest()[:8], 16)
             roll = (h % 1000) / 1000.0
