@@ -171,7 +171,10 @@
     logLevel: info
     unknownCommand: intercept
     injectEnabled: true
-    injectDryRun: true
+    # 注入轮次要真发消息。上游默认 true = 全部拦成 dry-run，
+    # 表现为「她生成了很好的回复，但 QQ 侧一条发送记录都没有」——
+    # 主动私聊、日记提醒、空间说说都走注入，全部受影响。
+    injectDryRun: false
     injectIntervalMs: 2000
     adminUsers:
       - "__OWNER_QQ__"
