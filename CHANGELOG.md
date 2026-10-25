@@ -2,6 +2,55 @@
 
 本项目按「改了什么 + 为什么」记录，不按版本号堆功能。所有日期为实际改动日期。
 
+## v0.7.36 — 2026-10-26 · 生产机核对：32 项到位，verify 首次 READY
+
+用户：“那我自己原本服务器这里呢，有些 bug 修了吗”
+
+做了一次逐条核对（不是靠回忆），共 **32 项**，覆盖今晚所有修复：
+
+```
+1. 自动更新相关   8 项（qqguard 不重启 / 假在线 / detached HEAD / fetch 重试 …）
+2. 注入与插件补丁 8 项（injectDryRun / 系统提醒标记 / 静音播报 / 版本豁免 …）
+3. 记忆/日记/B站 7 项（mem_rank / bili_watched / record_watched / limits.json …）
+4. 主动行为       4 项（时段系数 / 空闲来源 / 额度隔离 / 按天失眠）
+5. 面板接口       2 项
+6. 人设规则       4 项
+```
+
+第一次跑：**30 项通过，2 项缺失**——缺的是我今晚**只改在仓库、没同步到 `/opt/dsh`** 的两处
+`update.sh` 修复（补 tokenhub.env、服务不存在时先装 unit）。已补。
+
+第二次跑：**32/32 全到位**。
+
+## 又揪出一个自相矛盾的检查
+
+修完后 `verify.sh` 仍然 1 项失败，查到是 `checkall.py` 里**写死了两个过期期望值**：
+
+```
+[FAIL] QQ actionRatePerDay 期望 400，实际 2000
+[FAIL] QQ injectDryRun    期望 true，实际 false
+```
+
+这两个都是**我们主动改的**（400→2000、dry-run 关掉），但 checkall 的期望没跟着改，
+于是自己报自己失败。已修，并在代码里写清原因：
+
+```python
+# 2000 是安全阀（实测每天 30~45 条）。曾写 400，撞上会表现为"完全发不出消息"。
+# injectDryRun 必须是 false：true 时注入轮次的出站全被拦成 dry-run。
+```
+
+## 结果
+
+```
+verify.sh     RESULT: 18 passed, 0 failed
+              VERDICT: READY
+checkall      失败 0 项，警告 0 项
+bug 核对      32 项全到位
+运行           dsh-onebot active / llm-shim active / OneBot 已连接 / MCP 9 个
+```
+
+**这是生产机第一次达到 `VERDICT: READY`。** 之前一直是 17/1，那一项就是 checkall 的过期期望。
+
 ## v0.7.35 — 2026-10-26 · 接口扩到四类：参数 / 开关 / 文本 / 操作
 
 用户：“这些东西都要给他预留接口，包括很多东西都是要预留接口的，

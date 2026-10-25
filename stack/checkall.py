@@ -155,10 +155,13 @@ qq = {
     "requireMention": "true", "groupMentionAtOnly": "true",
     "groupActivationMinutes": "10", "groupMuteMinutes": "10",
     "dmPolicy": "allowlist", "rateLimitPerMinute": "8",
-    "actionRatePerMinute": "20", "actionRatePerDay": "400",
+    # 2000 是安全阀（实测每天 30~45 条）。曾写 400，撞上会表现为"完全发不出消息"。
+    "actionRatePerMinute": "20", "actionRatePerDay": "2000",
     "inboundImageMaxPx": "1024", "sttEnabled": "false",
     "interimMessages": "false", "deferredTimeoutMs": "0",
-    "injectEnabled": "true", "injectDryRun": "true",
+    # injectDryRun 必须是 false：true 时注入轮次的出站全被拦成 dry-run，
+    # 表现为"她生成了但一条都没发出去"（主动私聊/日记/空间都受影响）。
+    "injectEnabled": "true", "injectDryRun": "false",
 }
 # botQQ 不写死（每套部署不同），只校验格式
 _got = onebot_field("botQQ")
