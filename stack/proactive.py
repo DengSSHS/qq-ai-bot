@@ -27,9 +27,35 @@ QUEUE = os.path.join(BASE, "media", "onebot", "qq-inject.jsonl")
 ACTIONS = os.path.join(BASE, "media", "onebot", "qq-actions.log")
 LOG = os.path.join(BASE, "memory", "schedule.log")
 
-OWNER = __OWNER_QQ__
-BOT = __BOT_QQ__
+OWNER = 1709392682
+BOT = 3600398389
 QUIET = [("01:00", "07:30")]  # 静默时段：她在"睡觉"
+
+# 时段系数：把 rampPerHour 按她自己作息缩放（对齐 body_state 的时段划分）
+# 深夜/清晨几乎不想找人，上午一般，晚上精神最好。
+SLOT_MULT = [
+    ("07:30", "09:00", 0.3),   # 刚醒，不太会主动找人
+    ("09:00", "11:00", 0.9),   # 上午：精神还行
+    ("11:00", "13:00", 0.6),   # 中午：饿了，心思不在聊天
+    ("13:00", "15:00", 0.4),   # 午后：犯困
+    ("15:00", "18:00", 1.0),   # 下午：恢复正常
+    ("18:00", "20:00", 1.1),   # 傍晚：心情轻快
+    ("20:00", "23:00", 1.3),   # 晚上：一天里精神最好，话最多
+    ("23:00", "01:00", 0.7),   # 深夜：困了但还不想睡
+]
+
+
+def slot_mult(now_min):
+    """返回当前时段的概率系数；不在表里就按 1.0 处理。"""
+    for a, b, m in SLOT_MULT:
+        start, end = hm(a), hm(b)
+        if start <= end:
+            if start <= now_min < end:
+                return m
+        else:                      # 跨零点
+            if now_min >= start or now_min < end:
+                return m
+    return 1.0
 
 
 def hm(s):
@@ -148,7 +174,10 @@ def main():
                 continue
             cap = float(r.get("rampCap", 0.8))
             hours = max(0.0, (idle - need_min) / 60.0)
-            prob = min(cap, ramp * (1 + hours))
+            mult = slot_mult(now_min)
+            # 时段决定"这个时段最多可能多主动"（天花板），累积决定"这次有没有想起你"。
+            # 写成 cap*mult 而不是 ramp*mult：否则闲置一久，时段差异会被 (1+hours) 抹平。
+            prob = min(cap * mult, ramp * (1 + hours))
             hour_bucket = now.strftime("%Y-%m-%dT%H")
             h = int(hashlib.sha256((hour_bucket + rid).encode()).hexdigest()[:8], 16)
             roll = (h % 1000) / 1000.0
@@ -159,9 +188,12 @@ def main():
                 continue
             if st["fired"].get(rid + "@" + hour_bucket):
                 continue
-            if st["count"] >= budget:
+            # 主动私聊用自己的额度：固定型提醒（日记/空间）不该吃它的预算
+            dm_used = int(st.get("dmCount") or 0)
+            dm_budget = int(r.get("dailyBudget") or cfg.get("dmDailyBudget") or budget)
+            if dm_used >= dm_budget:
                 if dry:
-                    print("[%s] 今日预算已用完（%d）" % (rid, budget))
+                    print("[%s] 主动额度已用完（%d/%d）" % (rid, dm_used, dm_budget))
                 break
             if dry:
                 print("     内容：%s" % r["prompt"][:60])
@@ -169,6 +201,7 @@ def main():
             inject(r["prompt"])
             st["fired"][rid + "@" + hour_bucket] = now.isoformat()
             st["count"] += 1
+            st["dmCount"] = int(st.get("dmCount") or 0) + 1
             log("fired %s at %s (idle=%.0fm prob=%.2f count=%d)"
                 % (rid, now.strftime("%H:%M"), idle, prob, st["count"]))
             continue
