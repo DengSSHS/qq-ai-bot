@@ -292,5 +292,5 @@ Python **3.8+**，零第三方依赖（`requirements.txt` 只有说明）。
 
 ## 版本与许可
 
-当前 `0.7.15`（见 `VERSION`），改动记录在 `CHANGELOG.md`。
+当前 `0.7.16`（见 `VERSION`），改动记录在 `CHANGELOG.md`。
 MIT，见 `LICENSE`；第三方出处与角色形象版权说明见 `NOTICE.md`。

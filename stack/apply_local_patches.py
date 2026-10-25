@@ -218,6 +218,42 @@ def patch_bridge(apply_):
     return "已打"
 
 
+def patch_inject(apply_):
+    """注入事件改标成「系统·内部提醒」，不要伪装成主人发的消息。"""
+    p = os.path.join(LIB, "inject.js")
+    s = rd(p)
+    if "RELABEL_AS_SYSTEM" in s:
+        return "已打"
+    old = """    async consume(event) {
+        const round = { traceId: newTraceId(), intercepted: 0 };"""
+    new = """    async consume(event) {
+        // local patch (RELABEL_AS_SYSTEM): 注入事件是系统内部提醒，不是主人说的话。
+        try {
+            const ev = event;
+            if (ev && ev.post_type === 'message') {
+                const tag = '[内部提醒·非用户消息] ';
+                if (typeof ev.raw_message === 'string') ev.raw_message = tag + ev.raw_message;
+                if (Array.isArray(ev.message)) {
+                    for (const seg of ev.message) {
+                        if (seg && seg.type === 'text' && seg.data && typeof seg.data.text === 'string') {
+                            seg.data.text = tag + seg.data.text;
+                            break;
+                        }
+                    }
+                }
+                if (ev.sender && typeof ev.sender === 'object') ev.sender.nickname = '系统·内部提醒';
+            }
+        }
+        catch (e) { void e; }
+        const round = { traceId: newTraceId(), intercepted: 0 };"""
+    if old not in s:
+        return "跳过（找不到 consume 插入点）"
+    if not apply_:
+        return "未打"
+    wr(p, s.replace(old, new, 1))
+    return "已打"
+
+
 def patch_inbound(apply_):
     p = os.path.join(LIB, "inbound.js")
     s = rd(p)
@@ -301,7 +337,8 @@ def patch_cq(apply_):
 
 PATCHES = [
     ("prompt.js  长期记忆注入", patch_prompt),
-    ("bridge.js  时间挪到后缀（前缀缓存）", patch_bridge),
+    ("bridge.js  时间后缀 + 静音系统播报", patch_bridge),
+    ("inject.js  注入事件改标成系统提醒", patch_inject),
     ("inbound.js 主动接话概率门", patch_inbound),
     ("index.js   配置 schema + 透传", patch_index),
     ("cq.js      未知表情兜底成 [表情]", patch_cq),
