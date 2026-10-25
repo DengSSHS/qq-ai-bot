@@ -75,6 +75,23 @@ python3 /opt/dsh/switches.py off auto_update    # 关
 
 > 细节：`docs/auto-update.md`
 
+## 调参：一个接口，24 个旋钮
+
+所有能调的东西收在一个注册表里，改的时候不用记“哪个文件、什么格式”：
+
+```bash
+python3 panel_api.py list                 # 分组列出全部（带当前值）
+python3 panel_api.py set bili_share_per_day 20
+python3 panel_api.py set casualEngageRate 0.3
+python3 panel_api.py list --json          # 给面板用
+```
+
+覆盖：群聊行为（接话概率 / 激活窗口 / 表情提醒）、每天限制（8 项）、
+B 站（时间窗 / 叫醒次数 / token 预算）、主动行为（失眠概率 / 冲动 / 开关）。
+需要重启的项会明确返回 `need_restart: true`，面板给个按钮就行。
+
+> 这是给将来做图形面板铺的底：接口契约见 [`docs/panel-api.md`](docs/panel-api.md)
+
 ## 实测
 
 在 **Ubuntu 24.04.4 LTS (Noble Numbat)** / 内核 6.8 / x86_64 / 2 核 2G 的腾讯云轻量上跑了几个月：
@@ -264,7 +281,7 @@ Python **3.8+**，零第三方依赖（`requirements.txt` 只有说明）。
 
 ## 版本与许可
 
-当前 `0.7.33`（见 `VERSION`），改动记录在 `CHANGELOG.md`。
+当前 `0.7.34`（见 `VERSION`），改动记录在 `CHANGELOG.md`。
 MIT，见 `LICENSE`。
 
 - 第三方代码、参考过的思路、对上游插件的改动 → [`NOTICE.md`](NOTICE.md)

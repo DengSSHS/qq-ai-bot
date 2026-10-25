@@ -2,6 +2,61 @@
 
 本项目按「改了什么 + 为什么」记录，不按版本号堆功能。所有日期为实际改动日期。
 
+## v0.7.34 — 2026-10-26 · 面板接口：24 个旋钮收进一个注册表
+
+用户：“现在要准备给之后做面板打基础了，这些东西都要给一个可以改的方法。”
+
+### 问题
+
+可调的东西散在 **5 个文件、4 种格式**里：`limits.json`（JSON 平铺）、
+`cordis.patch.yml`（YAML，改的时候还要保住注释）、`routines.json`（JSON 嵌套数组）、
+`bili_window.conf.json`（时刻对）、`bili-budget.json`。
+面板如果直接读写这些，会被文件格式绑死——改一次代码面板就崩。
+
+### 改法：新增 `panel_api.py`
+
+把 24 个可调项登记成带元数据的记录，面板只调三条命令：
+
+```bash
+python3 panel_api.py list --json      # 全部控件描述 + 当前值
+python3 panel_api.py set <id> <值>    # 改一个，返回 JSON
+python3 panel_api.py restart          # 需要重启时
+```
+
+每条记录带：`id / group / label / type / value / default / min / max / options /
+unit / desc / restart / storage`。
+
+类型：`bool` / `int` / `percent`（面板显示 ×100，写回 0~1）/ `enum` /
+`schedule`（时刻对，可跨零点）。
+
+### 覆盖范围
+
+| 分组 | 项数 | 例子 |
+|---|---|---|
+| 群聊行为 | 6 | 主动接话概率、激活窗口、表情提醒概率、思考时又来消息怎么办 |
+| 每天限制 | 8 | B站@主人/天、两次@间隔、全局发送/天 |
+| B 站 | 5 | 低谷时间窗、每天叫醒次数、token 预算 |
+| 主动行为 | 5 | 失眠夜概率、基础冲动、关掉主动私聊 |
+
+### 两个实现细节
+
+- **不引入 pyyaml**（服务器上没有）：用 4 缩进正则改 `cordis.patch.yml`，
+  **保留行尾注释**。实测 `stickerNudgeRate: 0.6  # 每轮…` 改值后注释仍在。
+- **写文件全部原子 + 备份**：`.tmp` → `os.replace`，并先存 `.bak-panel`。
+  面板会被连点、会并发，不能写坏。
+
+### 实测
+
+```
+list            → 24 项分 4 组，带当前值（20% / 开关 / 18:00-08:00）
+set yaml 项     → need_restart: true，注释保留
+set JSON 项     → need_restart: false，bili_hub.limits() 立即读到新值
+set 非法 enum   → 拒绝：只能是：steer / queue
+set 时间窗      → [["20:00","07:00"]] 正确写入，可跨零点
+```
+
+接口契约写在 `docs/panel-api.md`（含渲染建议、返回值格式、两条设计约束）。
+
 ## v0.7.33 — 2026-10-26 · 每天限制从代码里抽出来（重点：B 站 @ 主人）
 
 用户原话：“一天限制可以 @ 的数量这个是不行的，这样反而还有点累赘，不过这个还是可以保留的，
