@@ -1,0 +1,11 @@
+[Unit]
+Description=Diary writing at noon and after midnight
+
+[Timer]
+OnCalendar=*-*-* 12:00:00
+OnCalendar=*-*-* 00:10:00
+AccuracySec=2min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

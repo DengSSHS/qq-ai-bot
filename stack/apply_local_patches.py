@@ -600,24 +600,49 @@ def patch_mem_layers(apply_):
 
 
 def patch_bubble_spread(apply_):
-    """长回复别压缩成长条：气泡上限 3 → 6，正常长度一句话一个气泡。
+    """气泡条数上限从 limits.json 读（私聊/群聊分开），超限合并、不截断。
 
-    原来超过 3 句就合并回 3 条，读起来断不开（用户反馈「合并并不完整，还是分散吧」）。
+    2026-10-26：原来硬编码「超过 3 句合并回 3 条」，长回复被压成难读的长条。
+    按方案第一步：私聊默认 4 条、群聊默认 2 条，都可在 limits.json 里改；
+    超出就合并（段间空行），**绝不静默丢弃**。
     """
     p = os.path.join(LIB, "bridge.js")
     s = rd(p)
-    if "parts.length > 6" in s:
+    if "BUBBLE_LIMIT_CFG" in s:
         return "已打"
+
+    # 需要同步读文件
+    if "readFileSync" not in s.split("export class")[0]:
+        anchor = "import { realpath } from 'node:fs/promises';"
+        if anchor not in s:
+            return "跳过（找不到 fs import）"
+        s = s.replace(anchor, anchor + chr(10) + "import { readFileSync } from 'node:fs';", 1)
+
     old = """        if (parts.length > 3) {
             const per = Math.ceil(parts.length / 3);"""
-    new = """        // local patch (BUBBLE_SPREAD): 上限 3 → 6，超出的才合并
+    old2 = """        // local patch (BUBBLE_SPREAD): 上限 3 → 6，超出的才合并
         if (parts.length > 6) {
             const per = Math.ceil(parts.length / 6);"""
-    if old not in s:
+    new = """        // local patch (BUBBLE_LIMIT_CFG): 上限从 limits.json 读（私聊/群聊分开），
+        // 超出就合并成 maxParts 条，**不截断**。
+        let maxParts = 4;
+        try {
+            const lim = JSON.parse(readFileSync((process.env.DSH_HOME || '/opt/dsh') + '/limits.json', 'utf8'));
+            const isGroup = params && params.group_id !== undefined && params.group_id !== null;
+            maxParts = Number(isGroup ? lim.bubble_max_group : lim.bubble_max_private) || maxParts;
+        }
+        catch (e) { void e; }
+        if (maxParts > 1 && parts.length > maxParts) {
+            const per = Math.ceil(parts.length / maxParts);"""
+    if old in s:
+        s = s.replace(old, new, 1)
+    elif old2 in s:
+        s = s.replace(old2, new, 1)
+    else:
         return "跳过（找不到分句上限）"
     if not apply_:
         return "未打"
-    wr(p, s.replace(old, new, 1))
+    wr(p, s)
     return "已打"
 
 

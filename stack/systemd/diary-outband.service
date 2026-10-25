@@ -1,0 +1,10 @@
+[Unit]
+Description=Write today's diary out-of-band (no QQ message involved)
+After=network-online.target dsh-onebot.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/dsh
+EnvironmentFile=-/opt/dsh/qwen.env
+ExecStart=/usr/bin/python3 /opt/dsh/diary_outband.py
+Nice=15

@@ -176,6 +176,54 @@ def _knowledge_save(entries):
         wrj(KNOW, {"entries": entries, "updated": int(time.time())})
 
 
+def _session_summaries(toks, k=3):
+    """会话摘要也是 L3 的一部分（每次空闲蒸馏追加一行）。"""
+    out = []
+    d = os.path.join(MEM, "session_log")
+    try:
+        files = sorted(os.listdir(d))[-4:]
+    except Exception:
+        return out
+    for name in files:
+        txt = rd(os.path.join(d, name), "")
+        for block in txt.split("### ")[1:]:
+            head, _, body = block.partition("\n")
+            body = body.strip()
+            if not body:
+                continue
+            hit = sum(1 for t in toks if t in body)
+            if hit:
+                out.append((hit, head.strip(), body))
+    out.sort(key=lambda x: -x[0])
+    return out[:k]
+
+
+def _bili_watched(toks, k=3):
+    """她看过的 B 站视频（标题 + 备注）也参与召回，否则“昨天那个视频”永远查不到。"""
+    out = []
+    p = os.path.join(MEM, "bili-watched.jsonl")
+    try:
+        lines = io.open(p, encoding="utf-8").read().split("\n")
+    except Exception:
+        return out
+    for ln in lines[-200:]:
+        ln = ln.strip()
+        if not ln:
+            continue
+        try:
+            it = json.loads(ln)
+        except Exception:
+            continue
+        body = " ｜".join(str(it.get(x) or "") for x in ("title", "note", "summary") if it.get(x))
+        if not body:
+            continue
+        hit = sum(1 for t in toks if t in body)
+        if hit:
+            out.append((hit, str(it.get("bvid") or ""), body))
+    out.sort(key=lambda x: -x[0])
+    return out[:k]
+
+
 def recall(text, k=RECALL_K, budget=RECALL_BUDGET):
     """按当前消息检索大记忆库，返回可直接注入的文本块（可能为空串）。"""
     toks = _tokens(text)
@@ -226,6 +274,21 @@ def recall(text, k=RECALL_K, budget=RECALL_BUDGET):
             break
         lines.append(line)
         used += len(line)
+
+    # 看过什么 / 上一段聊了什么：这两类最容易“查不到”
+    for _hit, head, body in _bili_watched(toks, k=2):
+        line = "· ［看过%s］%s" % ((" " + head) if head else "", _clip(body, 200))
+        if used + len(line) > budget or len(lines) >= k:
+            break
+        lines.append(line)
+        used += len(line)
+    for _hit, head, body in _session_summaries(toks, k=2):
+        line = "· ［上次聊到%s］%s" % ((" " + head) if head else "", _clip(body, 200))
+        if used + len(line) > budget or len(lines) >= k:
+            break
+        lines.append(line)
+        used += len(line)
+
     for head, body in diary:
         if len(lines) >= k:
             break
@@ -402,6 +465,15 @@ def distill(dry=False):
 
     if summ:
         summary_write(summ)
+        # 方案要求：摘要"追加"进 L3，不是只存在临时文件里——
+        # 这样“上周聊过什么”也能被召回，且热缓冲的原文没被动过。
+        try:
+            logpath = os.path.join(MEM, "session_log", time.strftime("%Y-%m.md"))
+            os.makedirs(os.path.dirname(logpath), exist_ok=True)
+            with io.open(logpath, "a", encoding="utf-8") as f:
+                f.write("### %s\n%s\n\n" % (time.strftime("%Y-%m-%d %H:%M"), summ))
+        except Exception:
+            pass
 
     added = 0
     if facts:
