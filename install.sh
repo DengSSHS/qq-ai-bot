@@ -594,8 +594,24 @@ else
   ok "自动更新未开启（默认；要开：switches.py on auto_update）"
 fi
 
-sleep 8
-systemctl is-active --quiet dsh-onebot && ok "dsh-onebot 运行中" || die "dsh-onebot 没起来：journalctl -u dsh-onebot -n 50"
+# 等服务真正就绪：dsh 要加载插件、起 6 个 MCP，冷启动常需 20 秒以上。
+# 只 sleep 固定秒数会让 verify 误报"端口没监听 / 没有 bridge ready"（2026-10-25 干净机实测）。
+ready=0
+for i in $(seq 1 45); do
+  systemctl is-active --quiet dsh-onebot || { sleep 2; continue; }
+  if ss -lnt 2>/dev/null | grep -q ':8643 ' && ss -lnt 2>/dev/null | grep -q ':8090 '; then
+    ready=1
+    break
+  fi
+  sleep 2
+done
+if [ "$ready" = "1" ]; then
+  ok "dsh-onebot 运行中（8643 与 8090 已监听）"
+else
+  systemctl is-active --quiet dsh-onebot \
+    && warn "dsh-onebot 进程在，但 90 秒内端口未就绪（看 journalctl -u dsh-onebot -n 50）" \
+    || die "dsh-onebot 没起来：journalctl -u dsh-onebot -n 50"
+fi
 
 # ── 日志轮转（不配这个，长跑几个月必被日志咬一次）────────────────────
 # copytruncate 是必须的：dsh-onebot 和 llm-shim 都以 append 方式持有句柄，

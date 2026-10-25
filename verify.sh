@@ -20,6 +20,12 @@ chk_svc dsh-onebot
 chk_svc llm-shim
 
 echo "== 2. ports =="
+# 服务刚重启时端口可能还没起来（dsh 冷启动 20 秒以上）。
+# 这里最多等 30 秒，避免把"还没起好"误报成"没监听"。
+for _i in $(seq 1 15); do
+  ss -lnt 2>/dev/null | grep -q ':8643 ' && ss -lnt 2>/dev/null | grep -q ':8090 ' && break
+  sleep 2
+done
 chk_port 8643 "onebot ws"
 chk_port 8890 "llm shim"
 chk_port 8090 "dsh web"
