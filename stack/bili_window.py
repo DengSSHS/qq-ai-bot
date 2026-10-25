@@ -37,10 +37,11 @@ STATE = os.path.join(BASE, "memory/bili-window.json")
 LOG = os.path.join(BASE, "memory/bili-window.log")
 TULPA = "/opt/tulpa"
 
-# 低谷时段：跨零点写成 ["23:30", "08:00"]
+# 低谷时段：跨零点写成 ["18:00", "08:00"]（2026-10-25 从 23:30 提前到 18:00）
 DEFAULTS = {
-    "allowed_windows": [["23:30", "08:00"]],
-    "daily_auto_opens": 3,      # 低谷期每天最多自动开几次（每次都受下面时长限制）
+    "allowed_windows": [["18:00", "08:00"]],
+    "daily_auto_opens": 6,      # 低谷期每天最多自动开几次
+    "night_max_auto": 2,       # 其中 00:00-08:00 最多几次（给晚上留额度）      # 低谷期每天最多自动开几次（每次都受下面时长限制）
     "auto_minutes": 25,         # 自动开窗时长
     "manual_per_day": 2,        # 每天最多手动开几次
     "manual_max_minutes": 60,
@@ -117,6 +118,7 @@ def reset_day(st):
         st["day"] = today
         st["auto_opens"] = 0
         st["manual_opens"] = 0
+    st["night_opens"] = 0
     return st
 
 
@@ -149,6 +151,8 @@ def open_window(minutes, by="", manual=True):
         st["manual_opens"] = st.get("manual_opens", 0) + 1
     else:
         st["auto_opens"] = st.get("auto_opens", 0) + 1
+    if int(time.strftime("%H")) < 8:
+        st["night_opens"] = int(st.get("night_opens", 0)) + 1
     save(st)
     log("window opened %d min by=%s (%s)" % (minutes, st["opened_by"],
                                              "manual" if manual else "auto"))
@@ -261,6 +265,13 @@ def apply():
         return "高峰时段，不叫"
     if st.get("auto_opens", 0) >= cfg["daily_auto_opens"]:
         return "今天自动叫醒额度用完了（%d/%d）" % (st["auto_opens"], cfg["daily_auto_opens"])
+    # 凌晨别把额度吃光：00:00-08:00 最多叫 cfg["night_max_auto"] 次，
+    # 否则晚上（窗口真正有价值的时段）反而不能刷。
+    night_max = int(cfg.get("night_max_auto", 0) or 0)
+    if night_max > 0 and int(time.strftime("%H")) < 8:
+        night_used = int(st.get("night_opens", 0))
+        if night_used >= night_max:
+            return "凌晨叫醒已用 %d/%d（给晚上留额度）" % (night_used, night_max)
     last = st.get("last_auto_ts", 0)
     hours = max(0.0, (time.time() - last) / 3600.0) if last else 1.0
     prob = min(float(cfg["ramp_cap"]), float(cfg["ramp_per_hour"]) * (1 + hours))
@@ -269,6 +280,8 @@ def apply():
         return "低谷期，掷出 %.2f >= %.2f，这小时先不叫" % (roll, prob)
     ok = _nudge("（现在是你的时间）去 B 站刷刷吧，看到有意思的记得在评论区 @ 我。")
     st["auto_opens"] = st.get("auto_opens", 0) + 1
+    if int(time.strftime("%H")) < 8:
+        st["night_opens"] = int(st.get("night_opens", 0)) + 1
     st["last_auto_ts"] = int(time.time())
     save(st)
     log("nudge sent (roll=%.2f prob=%.2f, %d/%d)" % (
@@ -312,16 +325,7 @@ if __name__ == "__main__":
             by = a[j + 1] if j + 1 < len(a) else ""
         ok, msg = open_window(mins, by, manual=True)
         print(msg)
-        if ok:
-            try:
-                set_mcp(True)
-            except Exception:
-                pass
     elif "--close" in a:
         print(close_window("manual")[1])
-        try:
-            set_mcp(False)
-        except Exception:
-            pass
     else:
         print(status())

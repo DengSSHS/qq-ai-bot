@@ -475,10 +475,12 @@ systemctl enable --now toolmode.path        >>"$LOG" 2>&1 || warn "toolmode.path
 # 这几个以前只在作者机器上，没进仓库 → 别人装完对应功能根本不跑。
 # 缺任何一个都是静默失效（看起来装好了，其实什么也没做）。
 for t in qqguard.timer memory-distill.timer sticker-settle.timer \
-         usage-report.timer patch-doctor.timer diary-noon.timer diary-midnight.timer; do
+         usage-report.timer patch-doctor.timer; do
   systemctl enable --now "$t" >>"$LOG" 2>&1 || warn "$t 启动失败"
 done
-ok "定时任务已装：掉线看护 / 记忆蒸馏 / 收图结算 / 日报 / 漂移检测 / 日记提醒"
+ok "定时任务已装：掉线看护 / 记忆蒸馏 / 收图结算 / 日报 / 漂移检测"
+# 日记提醒由 proactive.py 的 routines（morning/noon/evening/night）负责，
+# 这里**不要再装** diary-noon/midnight 定时器：那套 inject_diary.sh 会重复提醒。
 
 # 自动更新：**默认不开**。
 # 理由：升级会重启 dsh，正在进行的对话会被打断；开发者的机器本來就该手动控制升级时机。

@@ -135,6 +135,18 @@ CASUAL_HINT_WIRE = """            // 主动接话轮：这条不是你被叫到�
                 final = CASUAL_ENGAGE_HINT + final;
             }"""
 
+MEM_HINT_CONST = """
+// Local patch (MEM_HINT): 问到过去的事时，提醒她先查记忆再回答。
+const MEM_HINT = '（提醒：这条在问过去的事、或你自己经历过的事。先调 diary_recent '
+    + '或 diary_search 查一下再答，别凭印象编；查不到就直说没记下来。）';
+const MEM_TRIGGER = /(昨天|前天|上次|之前|记得|日记|笔记|你(今天|昨天|前天|之前)|看了什么|刷到|你说过)/;
+"""
+
+MEM_HINT_WIRE = """        // Local patch (MEM_HINT): 命中回忆触发词时提醒她查日记/笔记
+        if (MEM_TRIGGER.test(final)) {
+            final = final + String.fromCharCode(10) + MEM_HINT;
+        }"""
+
 STICKER_NUDGE_CONST = """
 // Local patch: 表情提醒。把她"要不要配张表情"的念头每轮递到眼前——
 // 模型不会自发去调工具掷骰，光在人设里写一句等于没写。
@@ -269,7 +281,7 @@ def patch_inbound(apply_):
         return "跳过（找不到插入点）"
     if not apply_:
         return "未打"
-    s = s.replace(imp, imp + chr(10) + chr(10) + CASUAL_CONST + chr(10) + STICKER_NUDGE_CONST, 1)
+    s = s.replace(imp, imp + chr(10) + chr(10) + CASUAL_CONST + chr(10) + STICKER_NUDGE_CONST + chr(10) + MEM_HINT_CONST, 1)
     s = s.replace(old_gate, CASUAL_GATE, 1)
     # 概率门要用到两个 Map，必须声明成类字段（否则 this.casualQuota 是 undefined）
     field_anchor = "    groupActiveUsers = new Map();"
@@ -285,7 +297,7 @@ def patch_inbound(apply_):
     # 表情提醒：插在 dispatch 之前，群聊私聊都生效
     disp = "        await this.ctx.dispatchFollowup(chatId, final, role, nickname);"
     if disp in s and 'stickerNudgeRate' not in s:
-        s = s.replace(disp, STICKER_NUDGE_WIRE + chr(10) + disp, 1)
+        s = s.replace(disp, MEM_HINT_WIRE + chr(10) + STICKER_NUDGE_WIRE + chr(10) + disp, 1)
     wr(p, s)
     return "已打"
 
