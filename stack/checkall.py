@@ -528,7 +528,7 @@ try:
         if c["fake"]:
             bad("假成功：send_* 没拿到真实 message_id（看 %s）" % AUDIT)
         if c["fail"]:
-            warn("发送失败 %d 条（重启瞬间的 transport stopped，或掉线期间）" % c["fail"])
+            warn("发送失败 %d 条（掉线/未连接期间为主，重启瞬间也有）" % c["fail"])
 except Exception as e:
     warn("读不到发送审计：%s" % e)
 

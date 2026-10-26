@@ -76,3 +76,34 @@ cd /opt/dsh && python3 qq_status.py                 # 只能说"在线"，不代
 - **频繁重启是风控的主要诱因**。改代码时优先用 `apply_local_patches --check`，
   只做必要的一次重启。
 - NapCat 有时不打「登录成功」这行日志，所以**不能用它判断在线**。
+
+## 追加：连着被踢三次 = 账号级限制（2026-10-26 当天实录）
+
+重装设备指纹后正常跑了 2.5 小时（08:00 → 10:29），**在没有任何操作的情况下又被踢**。
+这说明限制已经从「设备」升级到「账号」。
+
+判据：
+
+| 现象 | 含义 |
+|---|---|
+| 重装后能跑一段时间，然后无操作被踢 | 账号被标记，不是设备 |
+| 11:59–12:15 每 2 分钟自动出一张新码 | 容器在扫码模式下持续请求登录，**会加重风控** |
+| 扫了立刻又被踢 | 账号限制没解除，先处理安全中心 |
+
+处置顺序（**先解限制，再扫码**）：
+
+1. 停容器，别让它一直刷登录请求
+2. 手机 QQ → 设置 → 账号安全 → 安全中心 → 解除那条 Linux 设备/异常登录的限制
+   （可能要短信验证 / 人脸 / 改密码，走完才算清干净）
+3. `python3 qq_login.py` 起容器拿码 → **2 分钟内扫掉**
+4. 真发一条验证（`get_status` 会假报在线）
+5. `systemctl start qqguard.timer health-mail.timer` 恢复托管
+
+停容器时要一起停的东西（否则会被自动拉起或反复告警）：
+
+```bash
+cd /opt/qqbot && docker compose stop napcat
+systemctl stop qqguard.timer      # 它会在检测到踢下线时 docker restart napcat
+systemctl stop health-mail.timer  # 否则每 10 分钟发"容器没跑"
+: > /opt/dsh/media/onebot/qq-outbox.jsonl   # 清掉积压，避免登录后一次性轰出去
+```
