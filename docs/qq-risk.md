@@ -107,3 +107,32 @@ systemctl stop qqguard.timer      # 它会在检测到踢下线时 docker restar
 systemctl stop health-mail.timer  # 否则每 10 分钟发"容器没跑"
 : > /opt/dsh/media/onebot/qq-outbox.jsonl   # 清掉积压，避免登录后一次性轰出去
 ```
+
+## 关键：谁在「一直请求登录」，以及怎么关
+
+风控期间最忌讳的就是"持续登录尝试"。这套系统里有两个来源：
+
+| 来源 | 行为 | 处理 |
+|---|---|---|
+| `qqguard.timer` | 检测到被踢 → `docker restart napcat` → **每次重启都是一次登录** | **已停用**（2026-10-26） |
+| NapCat 扫码模式 | 停在扫码界面时**每 2 分钟自动换一张码** = 持续登录请求 | `qq-churn-guard.timer` 兜底 |
+
+`qq-churn-guard`（每 5 分钟）规则：
+
+```
+容器在跑 且 未登录 且 已超 15 分钟  →  docker compose stop napcat
+登录正常                          →  什么都不做
+```
+
+效果：被踢之后最多再请求 15 分钟，然后彻底安静，不再自己加重风控。
+
+注意 `compose stop` 是"主动停"，`restart: unless-stopped` 不会把它拉起来——
+所以这个保险不会被容器重启策略抵消。
+
+需要登录时：
+
+```bash
+cd /opt/dsh && python3 qq_login.py     # 起容器 + 打印二维码（2 分钟内扫）
+```
+
+**不要**让容器长时间挂在扫码界面。
