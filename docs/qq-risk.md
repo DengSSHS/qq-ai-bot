@@ -180,3 +180,82 @@ cd /opt/dsh && python3 qq_login.py     # 起容器 + 打印二维码（2 分钟�
 
 - 间隔在变长 → 风险分在降，别动它
 - 间隔越来越短（几十分钟） → 标记还很重，应停一段时间再登
+
+## 扫码被拒时唯一走通的路：密码登录 + 短信验证码 + 新设备验证（2026-11-08）
+
+### 症状
+
+连续三天扫码，每次都是**扫码成功、确认后被拒**：
+
+```
+二维码已被扫描，等待确认...
+Login Error, ErrType: 1  ErrCode: 10
+```
+
+重装 QQ 数据（换设备指纹）也没用——第 2 天又掉。
+
+### 原因
+
+扫码登录过不了「新设备验证」这一步。账号长期未登录（8 天）+ 机房 IP + 全新设备，
+扫码只能走完第一道，第二道设备登记直接拒。
+
+### 走通的过程
+
+```
+密码登录  → 需要验证码（短信）
+短信验证码 → 通过
+新设备验证 → accounts.qq.com 确认
+→ 登录成功
+```
+
+三道全过，设备被账号正式登记。之后真发送验证：`message_id 1910087996` 正常。
+
+### 配置（NapCat 4.18.42+）
+
+`/opt/qqbot/.env`（**权限 600，只有 root 可读**，不进 git 不进备份）：
+
+```bash
+NAPCAT_QUICK_ACCOUNT=3600398389
+NAPCAT_QUICK_PASSWORD=<QQ密码>
+```
+
+`compose.yaml` 只写变量引用，不含明文：
+
+```yaml
+environment:
+  NAPCAT_QUICK_ACCOUNT: "${NAPCAT_QUICK_ACCOUNT}"
+  NAPCAT_QUICK_PASSWORD: "${NAPCAT_QUICK_PASSWORD}"
+```
+
+改完 `docker compose up -d --force-recreate napcat`，日志里会出现
+`检测到 NAPCAT_QUICK_PASSWORD，已在内存中计算 MD5 用于回退登录`。
+
+### 提交验证码的两种方式
+
+**A. WebUI（推荐）** —— NapCat 的验证界面在这个页面里：
+
+```bash
+# 在你自己的电脑上开隧道（不要在服务器上执行）
+ssh -i "<私钥路径>" -L 6099:127.0.0.1:6099 root@<服务器IP>
+# 浏览器打开（token 在 /opt/qqbot/data/config/webui.json）
+http://127.0.0.1:6099/webui/?token=<token>
+```
+
+WebUI 只监听 `127.0.0.1:6099`，所以必须用隧道，服务器不用开任何对外端口。
+
+**B. 命令行** —— 日志里会直接给验证链接：
+
+```bash
+docker logs --since 10m napcat 2>&1 | grep -o 'https://ti.qq.com[^ ]*' | tail -1
+```
+
+手机打不开这个链接时（常见），用 A。
+
+### 踩过的坑
+
+- **`ACCOUNT` 环境变量会让快速登录卡死**，既不成功也不出码。要扫码时先注释掉。
+- **不要在扫码界面挂太久**：NapCat 每 2 分钟自动换码 = 每 2 分钟一次登录请求，
+  挂一小时就是 30 次，风控只会更严。`qq-churn-guard` 会在掉线 15 分钟后自动停容器。
+- **别连续重扫**：每次扫码都是一条"新设备登录"记录，越扫越难通过。
+- **`get_status` 会说谎**：被踢后它仍报 `online: true`。判断必须靠真实发送
+  （`send_msg` 有没有返回正的 `message_id`）。
