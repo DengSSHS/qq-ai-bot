@@ -1246,6 +1246,51 @@ def patch_explore_hint(apply_):
 
 
 
+def patch_self_state(apply_):
+    """把「我现在的样子」（memory/self_state.md）注入到人设之后、规则之前。
+
+    为什么：检索出来的记忆是参考资料，读完就丢；人设应该是累积出来的。
+    这段文字由 mem_layers.refresh_self_state() 从日记/观后感/事实里蒸馏。
+
+    注入位置很重要：放「动态内容」区就只是资料，放在人设后面才是"她本人"。
+
+    ⚠️ 顺序不能反：platform 必须在 try 之前声明。
+    第一版把赋值写在 let 之前 → TDZ → 被 catch 静默吞掉；
+    更糟的是连 let 也被改没了，整个 buildPromptParts 抛 ReferenceError（她短暂失去人设）。
+    """
+    p = os.path.join(LIB, "prompt.js")
+    s = rd(p)
+    if "SELF_STATE" in s:
+        return "已打"
+
+    old = "    let platform = '## 规则优先级（冲突时按此顺序）\\n'"
+    if old not in s:
+        return "跳过（找不到 platform 声明）"
+    if not apply_:
+        return "未打"
+
+    L = chr(10)
+    new = (
+        "    // local patch (SELF_STATE): 「我现在的样子」放在人设之后、规则之前" + L +
+        "    let platform = '';" + L +
+        "    try {" + L +
+        "        const selfPath = join(process.env.DSH_HOME || '/opt/dsh', 'memory', 'self_state.md');" + L +
+        "        let selfText = readFileSync(selfPath, 'utf8').trim();" + L +
+        "        if (selfText) {" + L +
+        "            selfText = selfText.replace(/^#\\s*/gm, '## ');" + L +
+        "            if (selfText.length > 1400)" + L +
+        "                selfText = selfText.slice(0, 1400) + '…';" + L +
+        "            platform = selfText + String.fromCharCode(10)" + L +        "                + '（以上是你最近对自己的理解，会随时间变化；'" + L +        "                + '与上方人设、下方规则冲突时，一律以人设和规则为准。'" + L +        "                + '它不是规则，只是你现在的样子。）'" + L +        "                + String.fromCharCode(10) + String.fromCharCode(10);" + L +
+        "        }" + L +
+        "    }" + L +
+        "    catch (e) { void e; }" + L +
+        "    platform += '## 规则优先级（冲突时按此顺序）\\n'"
+    )
+    wr(p, s.replace(old, new, 1))
+    return "已打"
+
+
+
 PATCHES = [
     ("prompt.js  长期记忆注入", patch_prompt),
     ("bridge.js  时间后缀 + 静音系统播报", patch_bridge),
@@ -1263,6 +1308,7 @@ PATCHES = [
     ("写操作统一过闸（表情回应/拍一拍/代理）", patch_send_gateway),
     ("outbox（Python 走发送闸门）", patch_outbox),
     ("prompt.js 自主逛 B 站提示", patch_explore_hint),
+    ("prompt.js 注入自我认知（人设之后）", patch_self_state),
 ]
 
 

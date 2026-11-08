@@ -74,6 +74,15 @@ STOP = set("的了是我你他她它在我你它们这那什么怎么为什么�
 
 
 # ----------------------------------------------------------------- 小工具
+def log(msg):
+    """轻量日志：写记忆目录下的 mem_layers.log，失败就算了（不能因为记日志把主流程弄挂）。"""
+    try:
+        with io.open(os.path.join(MEM, "mem_layers.log"), "a", encoding="utf-8") as f:
+            f.write("%s %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), msg))
+    except Exception:
+        pass
+
+
 def rd(p, default=""):
     try:
         return io.open(p, encoding="utf-8").read()
@@ -565,6 +574,135 @@ def impress_pending(limit=2, dry=False):
     return "观后感已写 %d 条" % done
 
 
+SELF_PATH = os.path.join(MEM, "self_state.md")
+SELF_STATE = os.path.join(MEM, "self_state.json")
+
+
+def self_state_read():
+    return rd(SELF_PATH, "").strip()
+
+
+CORE_FACTS = os.path.join(BASE, "workspace", "AGENTS.md")
+
+
+def core_facts_block(max_chars=900):
+    """从核心记忆（AGENTS.md「事实」区）抄一段原样文字，钉在自我认知后面。
+
+    为什么要有这个：自我认知是模型压缩出来的，压缩就会丢细节，
+    而「重要的东西不能忘」——主人的号、她的号、常驻群、规则约定这类，
+    不该由一次摘要决定留不留。所以这部分**不经过模型**，直接抄。
+    """
+    try:
+        text = rd(CORE_FACTS, "")
+    except Exception:
+        return ""
+    if not text.strip():
+        return ""
+    # 取「## 事实」到下一个「## 」之间的内容
+    import re as _re
+    m = _re.search(r"^##\s*事实\s*$(.*?)(?=^##\s|\Z)", text, _re.M | _re.S)
+    body = (m.group(1) if m else "").strip()
+    if not body:
+        return ""
+    if len(body) > max_chars:
+        body = body[:max_chars].rstrip() + "\n- （后面还有，见 AGENTS.md）"
+    return "### 不能忘的事实（原样摘自已确认的核心记忆，不参与改写）\n" + body
+
+
+def refresh_self_state(dry=False, force=False, min_days=3):
+    """把「她记得的事」压成「她现在是什么样的人」。
+
+    为什么要这个：检索出来的记忆是**参考资料**，读完就丢；
+    而人设应该是**累积出来的**——她这阵子在乎什么、说话什么习惯、
+    对主人了解到什么程度、心态偏哪边。这些不该每轮重算，应该沉淀成一段话。
+
+    刷新条件：文件不存在，或距上次 > min_days 天，或 force。
+    输出 250-450 字，第一人称，带日期；不写规则、不写"你是AI"。
+    """
+    st = rdj(SELF_STATE, {})
+    last = float(st.get("ts") or 0)
+    age_days = (time.time() - last) / 86400.0 if last else 1e9
+    if not force and age_days < min_days and os.path.isfile(SELF_PATH):
+        return "自我认知还新（%.1f 天前更新），跳过" % age_days
+
+    # 素材：最近的日记 + 她写过观后感的视频 + 高可信事实
+    diaries = []
+    try:
+        base = os.path.join(MEM, "diary")
+        files = sorted(os.listdir(base))[-2:]
+        for fn in files:
+            txt = rd(os.path.join(base, fn), "")
+            for block in txt.split("### ")[1:]:
+                head, _, body = block.partition(chr(10))
+                body = body.strip()
+                if body:
+                    diaries.append("［%s］%s" % (head.strip()[:24], body[:220]))
+    except Exception:
+        pass
+    diaries = diaries[-10:]
+
+    watched = []
+    try:
+        for ln in io.open(os.path.join(MEM, "bili-watched.jsonl"), encoding="utf-8"):
+            ln = ln.strip()
+            if not ln:
+                continue
+            try:
+                r = json.loads(ln)
+            except Exception:
+                continue
+            if r.get("impression"):
+                watched.append("看了《%s》→ %s" % (str(r.get("title"))[:30], str(r.get("impression"))[:80]))
+    except Exception:
+        pass
+    watched = watched[-6:]
+
+    facts = []
+    try:
+        for it in _knowledge_entries():
+            if str(it.get("kind")) in ("pref", "person") and int(it.get("count") or 1) >= 1:
+                facts.append(str(it.get("text"))[:80])
+    except Exception:
+        pass
+    facts = facts[-20:]
+
+    if not diaries and not facts:
+        return "素材太少，先不写自我认知"
+
+    prompt = ("下面是「鲸鲸」这段时间的日记、她看完视频的感受、以及她记下的事实。\n"
+              "请写一段**她对自己的认识**（250-450 字），第一人称「我」。\n\n"
+              "要求：\n"
+              "1. 写「我现在是什么样的人」——在乎什么、说话什么调子、对主人了解到什么程度、这阵子心态偏哪边。\n"
+              "2. 从材料里**归纳倾向**，不要罗列事件、不要写成总结报告。\n"
+              "3. 可以承认矛盾（比如一边嫌他熬夜一边还是陪着）。\n"
+              "4. 不要出现「AI」「模型」「系统」「人设」「记忆」这类词；不要写规则。\n"
+              "5. 只输出这段文字本身。\n\n"
+              "日记：\n" + "\n".join(diaries) + "\n\n"
+              + ("看过的视频感受：\n" + "\n".join(watched) + "\n\n" if watched else "")
+              + "我记得的事实：\n" + "\n".join(facts)
+              )
+    try:
+        text = _llm(prompt).strip()
+    except Exception as e:
+        return "自我认知生成失败：%s" % str(e)[:80]
+    if not text:
+        return "模型返回空"
+    text = text[:900]
+
+    if dry:
+        print("（dry）会写入 %d 字：\n%s" % (len(text), text[:400]))
+        return "（dry）自我认知已生成"
+
+    header = ("# 我现在的样子（%s 更新）\n\n"
+              "> 这一段是从我最近的日记和感受里长出来的，不是别人给我写的规则。\n\n"
+              % time.strftime("%Y-%m-%d"))
+    core = core_facts_block()
+    wr(SELF_PATH, header + text + "\n" + ("\n" + core + "\n" if core else ""))
+    wrj(SELF_STATE, {"ts": time.time(), "chars": len(text)})
+    log("self_state refreshed: %d chars" % len(text))
+    return "自我认知已更新（%d 字）" % len(text)
+
+
 def idle_check(dry=False):
     idle = (time.time() - newest_mtime()) / 60.0 if newest_mtime() else 1e9
     st = rdj(STATE, {})
@@ -576,6 +714,10 @@ def idle_check(dry=False):
     msg = distill(dry=dry)
     try:
         extra = impress_pending(limit=2, dry=dry)
+        try:
+            msg += "｜" + refresh_self_state(dry=dry)
+        except Exception as e:
+            log("refresh_self_state failed: %s" % e)
         if extra and "没有待写" not in extra:
             msg = msg + "｜" + extra
     except Exception as e:
