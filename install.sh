@@ -444,7 +444,7 @@ fi
 if [ -f "$STACK/patch_tulpa_media.py" ]; then
   "$PY" "$STACK/patch_tulpa_media.py" || warn "Tulpa 选流补丁没打上（B站视频可能只剩元数据）"
 fi
-for f in patch_tulpa_danmaku.py patch_tulpa_gzip.py; do
+for f in patch_tulpa_danmaku.py patch_tulpa_gzip.py patch_tulpa_bangumi.py; do
   if [ -f "$STACK/$f" ]; then
     "$PY" "$STACK/$f" || warn "Tulpa 补丁 $f 没打上"
   fi
