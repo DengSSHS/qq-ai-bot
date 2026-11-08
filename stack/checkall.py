@@ -534,7 +534,24 @@ try:
         if c["fake"]:
             bad("假成功：send_* 没拿到真实 message_id（看 %s）" % AUDIT)
         if c["fail"]:
-            warn("发送失败 %d 条（掉线/未连接期间为主，重启瞬间也有）" % c["fail"])
+            _fl = {}
+            for line in io.open(AUDIT, encoding="utf-8"):
+                line = line.strip()
+                if not line or "error" not in line:
+                    continue
+                try:
+                    row = _json.loads(line)
+                except Exception:
+                    continue
+                if float(row.get("ts") or 0) < since or not row.get("error"):
+                    continue
+                k = str(row.get("error"))[:34]
+                _fl[k] = _fl.get(k, 0) + 1
+            warn("发送失败 %d 条：%s" % (c["fail"], "；".join(
+                "%s×%d" % (k, v) for k, v in sorted(_fl.items(), key=lambda x: -x[1])[:3])))
+            if any("transport stopped" in k for k in _fl):
+                warn("其中 transport stopped 是停机瞬间被中断的（可能已发出、也可能没发，"
+                     "重试会重复，所以不自动补发）")
 except Exception as e:
     warn("读不到发送审计：%s" % e)
 

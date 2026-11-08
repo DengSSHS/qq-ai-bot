@@ -1291,6 +1291,57 @@ def patch_self_state(apply_):
 
 
 
+def patch_send_retry(apply_):
+    """发送重试：掉线/重启那几秒的「not connected」不再直接丢掉消息。
+
+    connection.call() 在 socket 不是 OPEN 时**在写出前**就 reject（安全边界很干净），
+    但 bridge 原来是直接把这个错往上抛 → 一条刚好在这几秒生成的话就没了
+    （审计里 24h 9 条 "OneBot WebSocket not connected" 全是这么来的）。
+
+    只重试这一类错：帧根本没发出去，不可能重复。
+    "transport stopped" 不重试 —— 那时帧可能已经写进 socket，重试会发两遍。
+    """
+    src = os.path.join(BASE, "send-retry.js")
+    dst = os.path.join(LIB, "send-retry.js")
+    br = os.path.join(LIB, "bridge.js")
+
+    if not os.path.isfile(src):
+        return "跳过（没有 /opt/dsh/send-retry.js）"
+    b = rd(br)
+    if "SEND_RETRY" in b:
+        return "已打"
+    if not apply_:
+        return "未打"
+
+    shutil.copy2(src, dst)
+
+    if "from './send-retry.js'" not in b:
+        b = b.replace(
+            "import { buildChatId, classifyUserRole, splitChatId } from './chat.js';",
+            "import { buildChatId, classifyUserRole, splitChatId } from './chat.js';"
+            + chr(10) + "// local patch (SEND_RETRY): 掉线瞬间的发送重试（只重试确定没发出去的）"
+            + chr(10) + "import { withSendRetry } from './send-retry.js';", 1)
+
+    old = "    guardedConnectionCall(action, params, chatId) {"
+    if old not in b:
+        return "跳过（bridge.js 找不到 guardedConnectionCall）"
+    wrapper = (
+        "    guardedConnectionCall(action, params, chatId) {" + chr(10)
+        + "        // local patch (SEND_RETRY): 传输没连上时有限重试，别把话丢掉。" + chr(10)
+        + "        // 只对 send_msg 生效，且只重试「帧根本没写出去」的错（见 send-retry.js）。" + chr(10)
+        + "        if (action !== 'send_msg')" + chr(10)
+        + "            return this.guardedConnectionCallOnce(action, params, chatId);" + chr(10)
+        + "        return withSendRetry(() => this.guardedConnectionCallOnce(action, params, chatId), {" + chr(10)
+        + "            log: (level, message) => this.deps.log?.(level, message)," + chr(10)
+        + "        });" + chr(10)
+        + "    }" + chr(10)
+        + "    guardedConnectionCallOnce(action, params, chatId) {"
+    )
+    b = b.replace(old, wrapper, 1)
+    wr(br, b)
+    return "已打"
+
+
 PATCHES = [
     ("prompt.js  长期记忆注入", patch_prompt),
     ("bridge.js  时间后缀 + 静音系统播报", patch_bridge),
@@ -1309,6 +1360,7 @@ PATCHES = [
     ("outbox（Python 走发送闸门）", patch_outbox),
     ("prompt.js 自主逛 B 站提示", patch_explore_hint),
     ("prompt.js 注入自我认知（人设之后）", patch_self_state),
+    ("bridge.js 发送重试（掉线瞬间不丢消息）", patch_send_retry),
 ]
 
 

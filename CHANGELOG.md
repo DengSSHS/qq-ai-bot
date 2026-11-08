@@ -2,7 +2,54 @@
 
 本项目按「改了什么 + 为什么」记录，不按版本号堆功能。所有日期为实际改动日期。
 
+## v0.9.17 — 2026-11-09 · 掉线那几秒，话不再白丢
+
+上一条留下的“发送失败 16 条”，拆开看是这样：
+
+| 错误 | 条数 | 到底发生了什么 |
+|---|---|---|
+| `OneBot WebSocket not connected` | 9 | socket 还没 OPEN，`call()` **在写出任何字节之前**就 reject —— 这条话彻底没发出去 |
+| `OneBot transport stopped` | 7 | 停机瞬间 `failAllPending()` 把在途请求全否了，**可能已写进 socket**，只是没等到回包 |
+
+### 为什么只修第一种
+
+`connection.call()` 的实现是「先查 socket 状态，不 OK 就 reject」：
+
+```js
+const socket = this.socket;
+if (socket === undefined || socket.readyState !== WebSocket.OPEN || this.stopping) {
+    return Promise.reject(new OneBotNotConnectedError());   // 帧根本没发
+}
+```
+
+所以重试它**不可能造成重复消息**。而 `transport stopped` 是停机时把在途请求一起否掉，
+那时帧可能已经在路上了——重试就是发两遍。**宁可丢一条，也不发两遍**，所以这类一律不重试，
+只把原因写清楚。
+
+### 改法
+
+- 新增 `send-retry.js`：只对「确定没写出去」的错误重试，间隔 1.5s / 4s / 8s（合计约 13.5 秒）
+- `bridge.js` 的 `guardedConnectionCall` 拆成两层：外层重试（只对 `send_msg`），内层是原逻辑
+- 作为第 14 条本地补丁进 `apply_local_patches.py`，插件升级后会自动重打
+
+### 验证
+
+| 项 | 结果 |
+|---|---|
+| `tests/send_retry.mjs` | 7 项全过：not connected 重试、transport stopped 不重试、超时类不重试、用尽后必须抛错 |
+| 真实发送（outbox → 私聊） | `ok:true, message_id 1411220294`，链路没被打坏 |
+| 服务重启 | active，NRestarts 0，无异常日志 |
+| 整体检 | 退出码 0；发送失败改成带原因输出（`not connected×9；transport stopped×7`） |
+
+### 一个诚实的边界
+
+**`transport stopped` 那 7 条仍然会丢。** 这不是没修干净，是修不了：
+那一刻分不清“帧发出去了没有”，重试的代价是群里看到她说两遍。
+真要让这 7 条也不丢，只能改成“先落盘再发送 + 用 message_id 去重”，
+那是另一套做法（要能读到自己的消息回执），现在不做。
+
 ## v0.9.16 — 2026-11-09 · 体检报的两条“失败”：一条是误报，一条是真 bug
+ — 2026-11-09 · 体检报的两条“失败”：一条是误报，一条是真 bug
 
 体检报「稳定前缀跨轮不一致」+「outbox 24h 成功 11 失败 147」。查下来两者都有问题，但性质完全不同。
 
