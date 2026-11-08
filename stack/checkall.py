@@ -601,7 +601,10 @@ try:
         pass
     (warn if pend > 5 else ok)("待办意图 %d 条" % pend)
     # outbox 结果
-    okn = badn = 0
+    # 注意：“过期丢弃”不是发送失败。以前不分清，重启后重放旧任务会刷出一整批 expired，
+    # 把体检报成“147 失败”（2026-11-09 实例）。真失败只算真的连不上/被拒绝。
+    okn = badn = expired = 0
+    reasons = {}
     since = _t2.time() - 86400
     try:
         for line in io.open("/opt/dsh/media/onebot/qq-outbox.result.jsonl", encoding="utf-8"):
@@ -616,11 +619,19 @@ try:
                 continue
             if row.get("ok"):
                 okn += 1
+            elif row.get("expired") or str(row.get("error") or "").startswith("expired"):
+                expired += 1
             else:
                 badn += 1
+                why = str(row.get("error") or "?")[:40]
+                reasons[why] = reasons.get(why, 0) + 1
     except Exception:
         pass
-    (ok if badn == 0 else warn)("outbox 24h：成功 %d 条，失败 %d 条" % (okn, badn))
+    _ex = "（过期丢弃 %d）" % expired if expired else ""
+    (ok if badn == 0 else warn)("outbox 24h：成功 %d 条，失败 %d 条%s" % (okn, badn, _ex))
+    if reasons:
+        warn("outbox 失败原因：%s" % "；".join("%s×%d" % (k, v)
+                                              for k, v in sorted(reasons.items(), key=lambda x: -x[1])[:3]))
 except Exception as e:
     warn("调度器检查失败：%s" % e)
 

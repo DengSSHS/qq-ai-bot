@@ -13,19 +13,93 @@
  * 所以调用方可以事后确认"到底发没发出去"。
  * @module dsh-onebot/outbox
  */
-import { appendFile, readFile } from 'node:fs/promises';
+import { appendFile, readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 const FILE = 'qq-outbox.jsonl';
 const RESULT = 'qq-outbox.result.jsonl';
+const OFFSET = 'qq-outbox.offset';
+// 队列文件超过这个大小就压实一次（只保留未消费的尾巴）
+const COMPACT_BYTES = 256 * 1024;
 
 export function startOutbox({ dir, bridge, log, intervalMs = 2000 }) {
     const path = join(dir, FILE);
     const resultPath = join(dir, RESULT);
+    const statePath = join(dir, OFFSET);
     let consumed = 0;
+    // 消费到哪了要写盘。不写盘的后果（实测 2026-11-09）：
+    //   每次重启 consumed 归零 → 整个文件从头重放
+    //   → 旧任务被批量判“过期”（5 次重启刷出 190 条假失败，把体检报警了）
+    //   → 更糟的是 30 分钟内的任务会被**重发一遍**（群里看到重复发言）
+    let restored = false;
+    let savedAt = -1;
     let busy = false;
     // 发送失败后退避：掉线时每 2 秒重试一次会把日志刷爆（实测）
     let backoffUntil = 0;
+
+    const saveOffset = async (size) => {
+        if (consumed === savedAt)
+            return;
+        savedAt = consumed;
+        try {
+            // 先写临时文件再改名：中途崩了也不会留下半个偏移量
+            const tmp = statePath + '.tmp';
+            await writeFile(tmp, JSON.stringify({ offset: consumed, size, ts: Math.floor(Date.now() / 1000) }));
+            await rename(tmp, statePath);
+        }
+        catch (e) {
+            void e;
+        }
+    };
+
+    const restoreOffset = async (text) => {
+        restored = true;
+        try {
+            const st = JSON.parse(await readFile(statePath, 'utf8'));
+            const off = Number(st && st.offset);
+            const old = Number(st && st.size);
+            // 偏移量本身可用就用它（size 对不上只是文件长长了/压实过）
+            if (Number.isFinite(off) && off <= text.length) {
+                consumed = off;
+                savedAt = off;
+                return;
+            }
+            void old;
+        }
+        catch (e) {
+            void e;
+        }
+        // 没状态 / 状态坏了：**不要从头重放**。
+        // 从头的代价是两条实测过的：旧任务被判“过期”刷出一批假失败，
+        // 30 分钟内的任务还会被重发一遍（对方看到重复消息）。
+        // 改成：跳过那些已经超过 TTL 的旧行，能补发的只留下还没过期的。
+        consumed = freshStartOffset(text);
+        savedAt = -1;
+    };
+
+    /** 返回“第一条还没过期的任务”在文本里的位置；全都过期就返回末尾。 */
+    const freshStartOffset = (text, ttlS = 1800) => {
+        let at = 0;
+        while (true) {
+            const nl = text.indexOf('\n', at);
+            if (nl < 0)
+                return text.length;
+            const line = text.slice(at, nl).trim();
+            if (line !== '') {
+                let job = null;
+                try {
+                    job = JSON.parse(line);
+                }
+                catch (e) {
+                    void e;
+                }
+                const ts = Number(job && job.ts) || 0;
+                if (!ts || Date.now() / 1000 - ts <= ttlS)
+                    return at;          // 没时间戳的当新的，宁可补发也别默默丢
+            }
+            at = nl + 1;
+        }
+    };
 
     const appendResult = async (row) => {
         try {
@@ -102,6 +176,8 @@ export function startOutbox({ dir, bridge, log, intervalMs = 2000 }) {
             catch (e) {
                 return;
             }
+            if (!restored)
+                await restoreOffset(text);
             if (text.length < consumed)
                 consumed = 0;                       // 文件被清空/轮转
             let offset = consumed;
@@ -138,6 +214,26 @@ export function startOutbox({ dir, bridge, log, intervalMs = 2000 }) {
                     break;                          // 其它失败也先停，避免连续撞墙
                 offset = nl + 1;
                 consumed = offset;
+            }
+            await saveOffset(text.length);
+            // 压实：旧行不再需要，留在文件里只会让每次重启（万一丢了偏移量）重放一遍
+            if (consumed >= COMPACT_BYTES) {
+                try {
+                    const nowText = await readFile(path, 'utf8');
+                    const tail = nowText.length > consumed ? nowText.slice(consumed) : '';
+                    const tmp = path + '.compact';
+                    await writeFile(tmp, tail);
+                    await rename(tmp, path);
+                    consumed = 0;
+                    savedAt = -1;
+                    await saveOffset(tail.length);
+                    if (log)
+                        log('info', '[outbox] 队列已压实，保留未消费 ' + tail.length + ' 字节');
+                }
+                catch (e) {
+                    if (log)
+                        log('warn', '[outbox] 压实失败（不影响发送）：' + String(e && e.message || e).slice(0, 100));
+                }
             }
         }
         finally {

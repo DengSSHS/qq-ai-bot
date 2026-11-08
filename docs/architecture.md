@@ -157,7 +157,21 @@ qq-outbox.jsonl → bridge 的 startOutbox() → guardedConnectionCall
 - **TDZ**：`startOutbox` 接在 `const bridge` 之前 → `Cannot access 'bridge' before initialization`，插件静默失效
 - **启动即消费**：WS 还没连上就读走队列 → 消息丢失；改成"失败回退读位"
 
+第三个坑（2026-11-09，最贵的一个）：**消费位置只在内存里**。
+服务一重启 `consumed` 归零，整个队列文件从头重放：
+
+| 后果 | 实测 |
+|---|---|
+| 旧任务被批量判“过期” | 5 次重启刷出 190 条假失败，把体检报警 |
+| 30 分钟内的任务被**重发一遍** | 对方会看到重复消息（比漏发更难解释） |
+
+修法：消费位置写盘（`qq-outbox.offset`，temp+rename 原子写）；
+状态文件丢了/坏了也**不从头来**，而是跳到“第一条还没过期的任务”——
+旧行默默跳过，停机期间排的新消息照样补发。队列超过 256KB 自动压实。
+回归测试：`tests/outbox_restart.mjs`（模拟重启 + 模拟状态损坏两种场景）。
+
 checkall 第 18 段：scheduler 是否在跑、旧 timer 是否残留、待办意图数、outbox 24h 成败。
+**“过期丢弃”单列，不算失败**（否则一重启就报一堆假失败）。
 
 ---
 

@@ -164,15 +164,27 @@ def gen_line(hint):
 
 
 def _outbox_pending():
-    """outbox 里还没被消费的条数（掉线时别往里堆）。"""
+    """outbox 里还没被消费的条数（掉线时别往里堆）。
+
+    用消费位置算（qq-outbox.offset），不是用“队列行数 - 结果行数”：
+    结果文件里有“过期丢弃”和重试记录，两者本来就不一一对应，
+    旧算法掉线时会算出成百上千的假待办。
+    """
+    d = os.path.join(BASE, "media", "onebot")
+    q = os.path.join(d, "qq-outbox.jsonl")
+    st = os.path.join(d, "qq-outbox.offset")
     try:
-        q = os.path.join(BASE, "media", "onebot", "qq-outbox.jsonl")
-        r = os.path.join(BASE, "media", "onebot", "qq-outbox.result.jsonl")
-        nq = sum(1 for ln in io.open(q, encoding="utf-8") if ln.strip())
-        nr = sum(1 for ln in io.open(r, encoding="utf-8") if ln.strip()) if os.path.isfile(r) else 0
-        return max(0, nq - nr)
+        txt = io.open(q, encoding="utf-8", errors="replace").read()
     except Exception:
         return 0
+    off = 0
+    try:
+        o = int(json.load(io.open(st, encoding="utf-8")).get("offset") or 0)
+        if 0 <= o <= len(txt):
+            off = o
+    except Exception:
+        pass
+    return sum(1 for ln in txt[off:].split(chr(10)) if ln.strip())
 
 def pending():
     if not os.path.isfile(INTENTS):
