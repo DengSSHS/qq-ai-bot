@@ -45,6 +45,8 @@ PICK_JS = r"""
   }
   const node = (best || document.body).cloneNode(true);
   // 把侧栏/推荐/导航这些子树从副本里摘掉，再取文字
+  // （既按 class/id 匹配，也按标签名——很多站点只给 <nav> 不给 class）
+  node.querySelectorAll('nav, header, footer, aside, [role=navigation]').forEach(el => el.remove());
   node.querySelectorAll('*').forEach(el => { if (dirty(el)) el.remove(); });
   return node.innerText;
 }
@@ -118,8 +120,17 @@ def main():
     JUNK = re.compile(
         r"^(window\.|function\s*\(|var\s|const\s|let\s|[{}();]+$|!function|"
         r"Player version|Video (url|volume|time|duration)|icon_|[0-9]{2}:[0-9]{2}$)")
-    text = "\n".join(ln.strip() for ln in text.splitlines()
-                     if ln.strip() and not JUNK.match(ln.strip()))
+    kept = []
+    for ln in text.splitlines():
+        s = ln.strip()
+        if not s or JUNK.match(s):
+            continue
+        # 导航小标签（“关注 / 发贴 / 精华 / 视频”这种 1~4 字的词）不是正文。
+        # 判据：很短且没有任何标点——正常句子哪怕是“好短。”也带标点。
+        if len(s) <= 4 and not re.search(r"[\u3000-\u303f\uff00-\uffef.,!?;:]", s):
+            continue
+        kept.append(s)
+    text = "\n".join(kept)
     if len(text) > max_chars:
         text = text[:max_chars] + "\n…（已截断）"
     print(json.dumps({"ok": True, "title": title, "text": text}, ensure_ascii=False))
