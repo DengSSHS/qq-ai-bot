@@ -22,6 +22,7 @@
 import io
 import json
 import os
+import re
 import sys
 import time
 import urllib.request
@@ -45,6 +46,7 @@ READ_TOOLS = {
     "get_bilibili_status": "B 站登录状态",
     "cancel_video_job": "取消一个读视频任务",
     "get_video_danmaku": "读一条视频的弹幕（观众反应：哪段在笑、刷什么梗）",
+    "explore_bilibili": "自主逛：不给关键词也行，从记忆里挑好奇点去搜",
 }
 
 
@@ -311,6 +313,8 @@ def call_tool(name, args):
         bili_budget.ensure_conf()
         return {"ok": True, **bili_budget.status()}
 
+    if name == "explore_bilibili":
+        return explore(args)
     if name in READ_TOOLS:
         ok, why, left = gate()
         if not ok:
@@ -338,6 +342,133 @@ def call_tool(name, args):
             record_watched(name, args, res)
         return res
     return {"ok": False, "error": {"code": "unknown_tool", "message": name}}
+
+
+
+# ---------------------------------------------------------------- 自主逛
+def _curiosity_topics(k=3):
+    """从她自己的材料里挑候选好奇点：日记 + 看过的标题 + 事实库。
+
+    不调 LLM（省钱、快）：取最近的日记片段和看过的标题，交给调用方去搜。
+    """
+    cands = []
+    # ① 最近看过的标题（避免重复搜同一个）
+    try:
+        seen = set()
+        for ln in io.open(os.path.join(BASE, "memory/bili-watched.jsonl"), encoding="utf-8"):
+            ln = ln.strip()
+            if not ln:
+                continue
+            try:
+                r = json.loads(ln)
+            except Exception:
+                continue
+            t = str(r.get("title") or "").strip()
+            if t:
+                seen.add(t[:20])
+        cands.extend([("看过的", t) for t in list(seen)[-5:]])
+    except Exception:
+        pass
+    # ② 最近几天日记里出现过的名词性片段
+    try:
+        sys.path.insert(0, BASE)
+        import search_index
+        rows = search_index.search("好奇 想学 想了解 没看懂", limit=8)
+        for kind, head, body, _score in rows:
+            if kind == "diary" and body:
+                cands.append(("日记", str(body)[:80]))
+    except Exception:
+        pass
+    return cands[:k]
+
+
+def _pick_topic_by_llm():
+    """让模型从最近看过/写过的内容里挑一个真正想再了解的主题。
+
+    为什么要模型挑：直接从标题里截 2-6 个字会截到「每天认识一个」这种前缀，
+    搜出来全是无关内容。一次轻量调用换一个像样的关键词，值得。
+    """
+    import sys as _sys
+    _sys.path.insert(0, BASE)
+    try:
+        import mem_layers
+    except Exception:
+        return "", ""
+
+    titles, diaries = [], []
+    try:
+        for ln in io.open(os.path.join(BASE, "memory/bili-watched.jsonl"), encoding="utf-8"):
+            ln = ln.strip()
+            if not ln:
+                continue
+            try:
+                r = json.loads(ln)
+            except Exception:
+                continue
+            t = str(r.get("title") or "").strip()
+            if t:
+                titles.append(t[:60])
+    except Exception:
+        pass
+    try:
+        import search_index
+        for kind, head, body, _score in search_index.search("好奇 想弄明白 没看懂 挺有意思", limit=6):
+            if kind == "diary" and body:
+                diaries.append(str(body)[:120])
+    except Exception:
+        pass
+
+    if not titles and not diaries:
+        return "", ""
+
+    prompt = ("你刚在 B 站看了看东西。下面是你最近看过的标题和你写过的日记片段。\n"
+              "挑一个你确实还想再多了解的主题，输出**一个搜索关键词**（2-8 个字，名词短语，不要句子、不要引号）。\n"
+              "挑有具体信息量的（比如「抹香鲸」「韦伯效应」「火柴人动画」），不要「每天认识一个」这种空壳。\n"
+              "只输出关键词本身。\n\n"
+              "看过的标题：\n- " + "\n- ".join(titles[-6:]) + "\n"
+              + ("\n日记片段：\n- " + "\n- ".join(diaries[-3:]) + "\n" if diaries else ""))
+    try:
+        kw = mem_layers._llm(prompt).strip().strip('"\'「」')
+    except Exception as e:
+        return "", "模型挑词失败：%s" % str(e)[:60]
+    kw = re.sub(r"[\s\n]+", "", kw)[:12]
+    if not kw or len(kw) < 2:
+        return "", "模型没给出可用的关键词"
+    return kw, "自己想看的（从最近的记录里挑的）"
+
+
+def explore(args):
+    """自主逛：有 topic 就用 topic，没有就从记忆里挑一个好奇点去搜。"""
+    import re as _re
+    topic = str(args.get("topic") or "").strip()
+    limit = int(args.get("limit") or 5)
+    why = "自己指定的方向" if topic else ""
+
+    if not topic:
+        # 优先让模型挑（远比从标题里截词靠谱），失败才退回正则
+        topic, why = _pick_topic_by_llm()
+    if not topic:
+        for src, text in _curiosity_topics():
+            # 从片段里抽 2-6 个字的关键词：中文取连续片段，去掉标点
+            toks = _re.findall(r"[\u4e00-\u9fff]{2,6}", text)
+            if toks:
+                topic = toks[0]
+                why = "从%s里想到的：%s" % (src, text[:40])
+                break
+
+    if not topic:
+        return {"ok": False,
+                "error": {"code": "no_topic", "message": "暂时想不出搜什么；可以直接给我一个关键词。"},
+                "note": "也可以先去看看排行榜（get_ranking_videos）找灵感。"}
+
+    res = forward("search_videos", {"query": topic, "limit": limit})
+    if not isinstance(res, dict):
+        return res
+    res["topic_used"] = topic
+    if why:
+        res["why"] = why
+    res.setdefault("note", "搜到了就先看一两个；读完可以自己写一句感受。")
+    return res
 
 
 def record_watched(name, args, res):

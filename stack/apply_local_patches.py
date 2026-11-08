@@ -1221,6 +1221,31 @@ def patch_outbox(apply_):
     return "已打"
 
 
+def patch_explore_hint(apply_):
+    """平台提示里加一句「闲时可以自己搜」——让自主搜索有触发点。
+
+    工具本身在 bili_hub（explore_bilibili），但模型不知道就等于没有。
+    """
+    p = os.path.join(LIB, "prompt.js")
+    s = rd(p)
+    if "explore_bilibili" in s:
+        return "已打"
+    anchor = "    platform += '- 拍一拍："
+    i = s.find(anchor)
+    if i < 0:
+        return "跳过（找不到平台提示锚点）"
+    if not apply_:
+        return "未打"
+    line = ("    platform += '- 逛 B 站时别只刷推荐：想知道什么就用 explore_bilibili 自己搜"
+            "（不给关键词也行，会从你最近的记录里挑一个你真好奇的点），"
+            "也可以看排行榜 get_ranking_videos、追某个 UP 的 get_up_videos。"
+            "读完可以写一句自己的感受。"
+            + chr(10) + "'；" + chr(10))
+    wr(p, s[:i] + line + s[i:])
+    return "已打"
+
+
+
 PATCHES = [
     ("prompt.js  长期记忆注入", patch_prompt),
     ("bridge.js  时间后缀 + 静音系统播报", patch_bridge),
@@ -1237,6 +1262,7 @@ PATCHES = [
     ("事件适配层 events.js（notice 不再被丢）", patch_event_adapter),
     ("写操作统一过闸（表情回应/拍一拍/代理）", patch_send_gateway),
     ("outbox（Python 走发送闸门）", patch_outbox),
+    ("prompt.js 自主逛 B 站提示", patch_explore_hint),
 ]
 
 
