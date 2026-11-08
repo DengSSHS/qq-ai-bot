@@ -334,7 +334,7 @@ def call_tool(name, args):
         except Exception:
             pass
         # 看过什么要留痕，否则她事后想不起来（用户 2026-10-25 反馈）
-        if name in ("read_video", "get_video_job"):
+        if name in ("read_video", "get_video_job", "get_video_danmaku"):
             record_watched(name, args, res)
         return res
     return {"ok": False, "error": {"code": "unknown_tool", "message": name}}
@@ -386,6 +386,12 @@ def record_watched(name, args, res):
         if isinstance(body.get("speech"), dict):
             speed = str(body["speech"].get("state") or "")
 
+        # 2026-11-09：弹幕是「观众反应」的唯一来源，也要留痕
+        dm = ""
+        if str(name) == "get_video_danmaku":
+            items = body.get("items") or []
+            dm = " / ".join(str(x.get("text"))[:24] for x in items[:6] if isinstance(x, dict))
+
         # 没标题（多数情况）就用 get_video_info 补一次，否则记录里只有 bvid，
         # 事后根本想不起是哪个视频。
         if not title and bvid:
@@ -403,6 +409,8 @@ def record_watched(name, args, res):
             return
         rec = {"ts": int(time.time()), "tool": name, "bvid": bvid,
                "title": title, "summary": summary, "speech": speed}
+        if dm:
+            rec["dm"] = dm
         os.makedirs(os.path.dirname(WATCHED), exist_ok=True)
         with open(WATCHED, "a", encoding="utf-8") as f:
             f.write(json.dumps(rec, ensure_ascii=False) + chr(10))

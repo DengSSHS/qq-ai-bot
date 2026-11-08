@@ -377,3 +377,58 @@ get_video_danmaku("BV1EeHW69Eq6", limit=8)
 - 返回里带 `note`：「弹幕是观众反应，不是视频本身的内容」——让她别把弹幕当事实。
 - 弹幕量大的视频要设 `limit`，否则返回体很占 token。
 - 目前**只读**。发弹幕、点赞、私信这类写操作没做，风险见下。
+
+---
+
+## 自主找内容：排行榜 / 追 UP / 关注动态（2026-11-09 新增）
+
+| 工具 | 作用 | 备注 |
+|---|---|---|
+| `get_ranking_videos(limit, cursor)` | 全站排行榜，"最近什么火" | 不需要登录，新号不会一片空白 |
+| `get_up_videos(mid, limit, cursor)` | 某个 UP 主的投稿（按时间倒序） | WBI 签名；`mid` 从 `author_mid` 拿 |
+| `get_following_feed(limit, cursor)` | 关注动态里的视频投稿 | 需要登录；**她的新号没关注任何人 → 返回空页，不是错误** |
+
+配套改动：`public_item()` 现在带 `author_url` 和 `author_mid`——
+否则她只看得到 UP 的名字，拿不到 UID，就没法用 `get_up_videos`。
+
+三个 vendor 补丁：`patch_tulpa_extra.py`（新增 `_vendor/polylens/api/_extra_feed.py` +
+白名单 + 三个 method + 工具注册，`assert len(NAMES)==11` → 14）。
+
+### 踩过的坑（都写进代码注释）
+
+1. **`HttpClient.get_json()` 已经解包了 `{code,data}` 信封**，返回的就是 data 本体。
+   第一版我按 `data["data"]["list"]` 读 → 全部空。正确是 `data["list"]`。
+2. **`SearchItem` 是 slots dataclass**，字段必须给全（可空的显式 `None`），缺字段直接 TypeError。
+3. **`mid` 的 schema 上限**：B 站 mid 能到 16 位，第一版写 `maximum=999999999999`（12 位）→ 参数校验失败。
+
+---
+
+## 观后感自动入记忆（2026-11-09 新增）
+
+### 问题
+
+她读完视频只被记下「标题 + 字幕摘要」——那是**内容**，不是**感受**。
+下次问"你昨天看那个视频觉得怎样"，她只能复述简介。
+
+### 做法（不改 B 站接口，纯本地）
+
+1. `bili_hub.record_watched()`：弹幕工具的结果也落盘，记录里多一个 `dm` 字段（前 6 条弹幕）
+2. `mem_layers.impress_pending(limit=2)`：空闲时给最近 20 条**没有 impression** 的记录写一句话
+   - 输入：标题 + 弹幕样本 + 字幕摘要
+   - 输出：第一人称一句感受（prompt 里明确"别总结内容、别评价制作"）
+   - 每写一条就落盘，中途失败不丢已完成的
+3. 召回时 `_bili_watched()` 会把 `impression` 和 `dm` 一起带上——
+   问"你之前看的那个"时，她能想起**当时的感受**
+
+挂载点：`mem_layers.idle_check()` → `distill()` 之后顺手跑，只处理 2 条（控 token）。
+
+### 实测
+
+```
+（dry）抹香鲸的10个冷知识 → 原来我脑袋里那坨东西这么值钱，怪不得看的时候下意识摸了摸自己的头。
+```
+
+### 注意
+
+- 只处理最近 20 条，避免把几百条历史一次性烧掉
+- `impression` 是**追加字段**：老记录没有它，读取端按可选处理

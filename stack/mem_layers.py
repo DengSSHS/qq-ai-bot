@@ -214,7 +214,7 @@ def _bili_watched(toks, k=3):
             it = json.loads(ln)
         except Exception:
             continue
-        body = " ｜".join(str(it.get(x) or "") for x in ("title", "note", "summary") if it.get(x))
+        body = " ｜".join(str(it.get(x) or "") for x in ("title", "note", "impression", "dm", "summary") if it.get(x))
         if not body:
             continue
         hit = sum(1 for t in toks if t in body)
@@ -500,6 +500,71 @@ def distill(dry=False):
 
 
 # ------------------------------------------------------------- idle 检查
+def impress_pending(limit=2, dry=False):
+    """给最近看过、但还没写观后感的视频补一句话。
+
+    为什么要这个：她读完视频只会被记下「标题 + 字幕摘要」，
+    那是**内容**不是**感受**。下次问「你昨天看那个视频觉得怎样」，
+    没有这句就只能复述简介。所以空闲时让她自己写一句。
+
+    只处理最近 20 条、每次最多 limit 条，避免一次烧太多 token。
+    """
+    p = os.path.join(MEM, "bili-watched.jsonl")
+    try:
+        lines = [ln for ln in io.open(p, encoding="utf-8").read().split("\n") if ln.strip()]
+    except Exception:
+        return "没有观看记录"
+    rows = []
+    for ln in lines:
+        try:
+            rows.append(json.loads(ln))
+        except Exception:
+            rows.append({"_raw": ln})
+
+    targets = [r for r in rows[-20:]
+               if isinstance(r, dict) and not r.get("impression")
+               and (r.get("title") or r.get("summary"))]
+    if not targets:
+        return "没有待写观后感的视频"
+
+    done = 0
+    for rec in targets[:limit]:
+        prompt = (
+            "你在扮演「鲸鲸」。下面是你刚看完的一个 B 站视频。\n"
+            "请用**第一人称、一句话**写你当时的感受（别总结内容、别评价制作、别用「这部视频」这种腔调）。\n"
+            "可以提到你被逗笑/没看懂/觉得无聊/想起什么。\n\n"
+            "标题：" + str(rec.get("title") or "")[:80] + "\n"
+            + ("弹幕：" + str(rec.get("dm") or "")[:200] + "\n" if rec.get("dm") else "")
+            + ("内容摘要：" + str(rec.get("summary") or "")[:300] + "\n" if rec.get("summary") else "")
+        )
+        try:
+            line = _llm(prompt).strip().replace("\n", " ")[:120]
+        except Exception as e:
+            return "观后感生成失败：%s" % str(e)[:80]
+        if not line:
+            continue
+        if dry:
+            print("（dry）%s → %s" % (str(rec.get("title"))[:24], line))
+            done += 1
+            continue
+        rec["impression"] = line
+        rec["impression_ts"] = int(time.time())
+        done += 1
+        # 每写一条就落盘，避免中途失败丢全部
+        out_lines = []
+        for r in rows:
+            if r is rec:
+                out_lines.append(json.dumps(rec, ensure_ascii=False))
+            elif isinstance(r, dict) and "_raw" in r:
+                out_lines.append(r["_raw"])
+            else:
+                out_lines.append(json.dumps(r, ensure_ascii=False))
+        wr(p, "\n".join(out_lines) + "\n")
+        lines = out_lines
+
+    return "观后感已写 %d 条" % done
+
+
 def idle_check(dry=False):
     idle = (time.time() - newest_mtime()) / 60.0 if newest_mtime() else 1e9
     st = rdj(STATE, {})
@@ -509,6 +574,12 @@ def idle_check(dry=False):
     if last and last >= newest_mtime():
         return "这段已经蒸馏过了（空闲 %.1f 分钟）" % idle
     msg = distill(dry=dry)
+    try:
+        extra = impress_pending(limit=2, dry=dry)
+        if extra and "没有待写" not in extra:
+            msg = msg + "｜" + extra
+    except Exception as e:
+        log("impress_pending failed: %s" % e)
     if not dry:
         st["last_distill"] = time.time()
         st["idle_min"] = round(idle, 1)
