@@ -23,6 +23,7 @@ import io
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 import urllib.request
@@ -232,6 +233,34 @@ for _n, _d in READ_TOOLS.items():
     TOOLS.append({"name": _n, "description": _d + "（受浏览时间窗限制）",
                   "inputSchema": {"type": "object", "properties": {}, "additionalProperties": True}})
 
+# HUB_WATCH: 追番（看正片整集，不是二创拆解）
+TOOLS.extend([{
+    "name": "bili_watch_episode",
+    "description": ("看番剧正片的整集（本地转写 + 每窗口抽一帧），断点续传。"
+                    "season 是番剧 ss 号（MyGO = 73077），ep 是第几集。"
+                    "后台跑，约 3 分钟看 5 分钟剧情；跑完用 bili_watch_read 读台词稿。"
+                    "别用 search_videos 找番剧——那只会搜到别人的解说。"),
+    "inputSchema": {"type": "object",
+                    "properties": {"season": {"type": "integer", "description": "番剧 ss 号，默认 73077"},
+                                   "ep": {"type": "integer", "description": "第几集，从 1 开始"}},
+                    "required": ["ep"]},
+}, {
+    "name": "bili_watch_status",
+    "description": "看某一集看到哪儿了（百分比、已转写多少句、是否还在跑）。",
+    "inputSchema": {"type": "object",
+                    "properties": {"season": {"type": "integer"}, "ep": {"type": "integer"}},
+                    "required": ["ep"]},
+}, {
+    "name": "bili_watch_read",
+    "description": ("读已看过的台词稿（带绝对秒数时间码）。from_sec 从第几秒开始，"
+                    "limit 最多几句（默认 120）。这是正片内容，不是别人拆解。"),
+    "inputSchema": {"type": "object",
+                    "properties": {"season": {"type": "integer"}, "ep": {"type": "integer"},
+                                   "from_sec": {"type": "number"},
+                                   "limit": {"type": "integer"}},
+                    "required": ["ep"]},
+}])
+
 
 def reply(obj):
     sys.stdout.write(json.dumps(obj, ensure_ascii=False) + chr(10))
@@ -296,6 +325,106 @@ def wait_job(res, budget_s=30, interval=1.5):
     return out
 
 
+# ---- HUB_WATCH：追番（正片整集 / 断点续传）--------------------------------
+WATCH_DIR = "/opt/tulpa/data/bilibili/watch"
+WATCH_PY = "/opt/dsh/bili_watch_episode.py"
+WATCH_PYTHON = "/opt/tulpa/.venv/bin/python"
+
+
+def _watch_files(season, ep):
+    d = os.path.join(WATCH_DIR, "ss%s" % season)
+    return dict(dir=d,
+                jsonl=os.path.join(d, "ep%s.jsonl" % ep),
+                md=os.path.join(d, "ep%s.md" % ep),
+                prog=os.path.join(d, "ep%s.progress" % ep),
+                meta=os.path.join(d, "ep%s.meta.json" % ep),
+                log=os.path.join(d, "ep%s.log" % ep),
+                lock=os.path.join(d, "ep%s.lock" % ep))
+
+
+def _watch_state(season, ep):
+    f = _watch_files(season, ep)
+    meta = {}
+    try:
+        meta = json.load(io.open(f["meta"], encoding="utf-8"))
+    except Exception:
+        pass
+    done = 0.0
+    try:
+        done = float(io.open(f["prog"], encoding="utf-8").read().strip())
+    except Exception:
+        pass
+    lines = 0
+    if os.path.exists(f["jsonl"]):
+        lines = sum(1 for ln in io.open(f["jsonl"], encoding="utf-8") if ln.strip())
+    duration = float(meta.get("duration") or 0)
+    running = False
+    try:
+        pid = int(io.open(f["lock"], encoding="utf-8").read().strip())
+        os.kill(pid, 0)
+        running = True
+    except Exception:
+        pass
+    return dict(season=season, ep=ep, title=meta.get("title"), duration_seconds=duration,
+                done_until=round(done, 1), lines=lines, running=running,
+                percent=round(done / duration * 100, 1) if duration else 0.0,
+                finished=bool(duration) and done >= duration - 1,
+                transcript=f["md"] if os.path.exists(f["md"]) else None)
+
+
+def watch_episode(args):
+    """开始/继续看某一集；已在跑就只报进度，不重复起进程。"""
+    season = int(args.get("season") or 73077)
+    ep = int(args.get("ep") or 1)
+    st = _watch_state(season, ep)
+    if st["finished"]:
+        st["note"] = "这一集已看完，用 bili_watch_read 读台词稿。"
+        return st
+    if st["running"]:
+        st["note"] = "正在看，过一会儿用 bili_watch_status 查。"
+        return st
+    f = _watch_files(season, ep)
+    os.makedirs(f["dir"], exist_ok=True)
+    log = io.open(f["log"], "ab")
+    proc = subprocess.Popen([WATCH_PYTHON, WATCH_PY, "--season", str(season), "--ep", str(ep)],
+                            stdout=log, stderr=log, stdin=subprocess.DEVNULL,
+                            start_new_session=True, close_fds=True)
+    io.open(f["lock"], "w", encoding="utf-8").write(str(proc.pid))
+    st.update(running=True, pid=proc.pid,
+              note="后台开始看这一集：约 3 分钟看 5 分钟剧情，用 bili_watch_status 查进度。")
+    return st
+
+
+def watch_read(args):
+    """读台词稿（正片内容）。"""
+    season = int(args.get("season") or 73077)
+    ep = int(args.get("ep") or 1)
+    start = float(args.get("from_sec") or 0)
+    limit = max(1, min(int(args.get("limit") or 120), 600))
+    f = _watch_files(season, ep)
+    if not os.path.exists(f["jsonl"]):
+        return {"ok": False, "error": {"code": "not_watched", "message": "这一集还没开始看"},
+                "note": "先调 bili_watch_episode。"}
+    rows = []
+    for ln in io.open(f["jsonl"], encoding="utf-8"):
+        ln = ln.strip()
+        if not ln:
+            continue
+        try:
+            r = json.loads(ln)
+        except Exception:
+            continue
+        if float(r.get("t0") or 0) < start:
+            continue
+        rows.append(r)
+        if len(rows) >= limit:
+            break
+    rows.sort(key=lambda r: r.get("t0") or 0)
+    return {"ok": True, "ep": ep, "from_sec": start, "count": len(rows),
+            "lines": [{"t": r.get("t0"), "text": r.get("text")} for r in rows],
+            "note": "本地转写，可能误听；时间码是绝对秒数。"}
+
+
 def call_tool(name, args):
     if name == "bili_now":
         ok, why, left = gate()
@@ -308,6 +437,12 @@ def call_tool(name, args):
                 "note": "" if ok else "被限频拒绝了，别重试，跟主人说一声"}
     if name == "bili_share_to_owner":
         return share(args)
+    if name == "bili_watch_episode":
+        return watch_episode(args)
+    if name == "bili_watch_status":
+        return _watch_state(int(args.get("season") or 73077), int(args.get("ep") or 1))
+    if name == "bili_watch_read":
+        return watch_read(args)
     if name == "bili_budget":
         import bili_budget
         bili_budget.ensure_conf()
