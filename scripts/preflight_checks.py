@@ -112,11 +112,19 @@ def check_doc_numbers():
         for f in ("README.md",):
             if not os.path.exists(f):
                 continue
-            m = re.search(r"(\d+)\s*个单元测试|新增 `tests/`：(\d+)|(\d+) 个测试", 
+            # 允许写成下界（"140+ 个测试"）：每次加测试都要求改文档太脆，
+            # 但完全不管又会腐烂成 38 个那种过期数字。下界既能防腐烂，也不用天天改。
+            m = re.search(r"(\d+)(\+)?\s*个单元测试|新增 `tests/`：(\d+)(\+)?|(\d+)(\+)?\s*个测试",
                           open(f, encoding="utf-8").read())
             if m:
-                claimed = int(next(g for g in m.groups() if g))
-                if claimed != n_cases:
+                groups = m.groups()
+                claimed = int(next(g for g in groups if g and g.isdigit()))
+                is_lower_bound = "+" in [g for g in groups if g == "+"]
+                if is_lower_bound:
+                    if claimed > n_cases:
+                        fails.append("%s 说至少 %d 个单元测试，实际只有 %d 个"
+                                     % (f, claimed, n_cases))
+                elif claimed != n_cases:
                     fails.append("%s 说 %d 个单元测试，实际 %d 个"
                                  % (f, claimed, n_cases))
 
