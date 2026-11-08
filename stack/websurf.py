@@ -16,6 +16,7 @@ import json
 import os
 import re
 import socket
+import subprocess
 import sys
 import traceback
 import urllib.parse
@@ -42,6 +43,11 @@ def log(msg):
             f.write("%s %s" % (datetime.now().strftime("%F %T"), msg) + chr(10))
     except Exception:
         pass
+
+
+MOBILE_UA = ("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+             "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 "
+             "Mobile/15E148 Safari/604.1")
 
 
 # ── 防 SSRF：只允许公网 http/https ─────────────────────────────────────
@@ -124,7 +130,7 @@ def _getaddrinfo_pinned(host, ip):
     return real, patched
 
 
-def _fetch_once(url, timeout):
+def _fetch_once(url, timeout, ua=None):
     parts = urllib.parse.urlsplit(url)
     if parts.scheme.lower() not in ("http", "https"):
         raise ValueError("只允许 http/https 网址")
@@ -133,7 +139,7 @@ def _fetch_once(url, timeout):
     addrs = _resolve_safe(host, port)
 
     req = urllib.request.Request(url, headers={
-        "User-Agent": UA,
+        "User-Agent": ua or UA,
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
         "Accept": "text/html,application/xhtml+xml",
     })
@@ -171,14 +177,15 @@ class _Redirect(Exception):
         self.url = url
 
 
-def fetch(url, timeout=TIMEOUT, _hop=0):
+def fetch(url, timeout=TIMEOUT, _hop=0, ua=None):
+    """抓页面。ua 可指定（403 时换移动端再试一次）。"""
     try:
-        raw, charset = _fetch_once(url, timeout)
+        raw, charset = _fetch_once(url, timeout, ua=ua)
     except _Redirect as r:
         if _hop >= MAX_REDIRECTS:
             raise ValueError("重定向超过了 %d 次，放弃" % MAX_REDIRECTS)
         log("redirect %s -> %s" % (url, r.url))
-        return fetch(r.url, timeout, _hop + 1)
+        return fetch(r.url, timeout, _hop + 1, ua=ua)
     except ValueError as e:
         log("blocked %s : %s" % (url, e))
         raise
@@ -190,14 +197,43 @@ def fetch(url, timeout=TIMEOUT, _hop=0):
     return raw.decode("utf-8", "replace")
 
 
+def _pick_container(soup):
+    """挑正文容器：按"文字多、链接少"打分。
+
+    为什么要打分：以前直接 get_text()，等于把导航、侧栏、推荐位全捞进来；
+    抓到 SPA 页面时又只剩一堆菜单，正文一个字没有。
+    打分 = 纯文字长度 × (1 - 链接占比)，够朴素也够准。
+    """
+    best, best_score = None, 0.0
+    # 优先看这些容器，没有就退回 body
+    cands = soup.find_all(["article", "main"]) or \
+        [d for d in soup.find_all("div") if d.get("id") in ("content", "main", "article")
+         or "post_content" in " ".join(d.get("class") or [])] or [soup.body or soup]
+    for node in cands:
+        if node is None:
+            continue
+        text_len = len(node.get_text(" ", strip=True))
+        if text_len < 100:
+            continue
+        link_len = sum(len(a.get_text(" ", strip=True)) for a in node.find_all("a"))
+        score = text_len * (1.0 - min(1.0, float(link_len) / max(1, text_len)))
+        if score > best_score:
+            best, best_score = node, score
+    return best
+
+
 def clean_text(html, limit=MAX_TEXT):
     if HAS_BS4:
         soup = BeautifulSoup(html, "html.parser")
-        for tag in soup(["script", "style", "noscript", "nav", "header", "footer", "form", "iframe", "svg"]):
+        for tag in soup(["script", "style", "noscript", "nav", "header", "footer", "form",
+                         "iframe", "svg", "aside"]):
             tag.decompose()
-        text = soup.get_text(chr(10))
+        node = _pick_container(soup) or soup
+        text = node.get_text(chr(10))
     else:
-        html = re.sub(r"(?is)<(script|style|noscript)[^>]*>.*?</\1>", " ", html)
+        # 没 bs4 时的兜底：先把导航/页脚/侧栏整块删掉，再去标签
+        html = re.sub(r"(?is)<(script|style|noscript|nav|header|footer|aside|iframe|svg)[^>]*>.*?</\1>",
+                      " ", html)
         text = re.sub(r"(?s)<[^>]+>", " ", html)
     lines = [re.sub(r"[ \t\u3000]+", " ", ln).strip() for ln in text.splitlines()]
     lines = [ln for ln in lines if ln]
@@ -205,6 +241,67 @@ def clean_text(html, limit=MAX_TEXT):
     if len(out) > limit:
         out = out[:limit] + chr(10) + "…（已截断，原文更长）"
     return out
+
+
+# ───────────────────── ② 站点适配器（有些站的关键内容在接口/服务端页里）─────────────────────
+def _tieba(url):
+    """百度贴吧：首页是 JS 渲染（只返回"百度贴吧"四个字），但吧页和帖子页是服务端渲染的。
+
+    · /f?kw=吧名  → 帖子列表（标题 + 链接 + 回复数）
+    · /p/帖子id   → 楼层正文
+    """
+    if not HAS_BS4:
+        return None
+    soup = BeautifulSoup(fetch(url), "html.parser")
+    # 帖子页：楼层正文
+    posts = soup.select("div.d_post_content")
+    if posts:
+        titles = soup.select("h3.core_title, h1.core_title_text")
+        head = titles[0].get_text(" ", strip=True) if titles else ""
+        out = ["【贴吧帖子】" + head] if head else ["【贴吧帖子】"]
+        for i, p in enumerate(posts[:20], 1):
+            t = p.get_text(chr(10), strip=True)
+            if t:
+                out.append("%d 楼：%s" % (i, t[:600]))
+        return chr(10).join(out)
+    # 吧页：帖子列表
+    rows = soup.select("li.j_thread_list")
+    if rows:
+        out = ["【贴吧列表】"]
+        for li in rows[:25]:
+            a = li.select_one("a.j_th_tit")
+            if not a:
+                continue
+            title = a.get_text(" ", strip=True)
+            href = a.get("href") or ""
+            if href.startswith("/"):
+                href = "https://tieba.baidu.com" + href
+            num = li.select_one("span.threadlist_rep_num")
+            out.append("- %s%s" % (title, ("（%s 回复）" % num.get_text(strip=True)) if num else ""))
+            if href:
+                out.append("  " + href)
+        return chr(10).join(out)
+    return None
+
+
+SITE_ADAPTERS = (
+    (re.compile(r"^https?://tieba\.baidu\.com/(f\?|p/)"), _tieba),
+)
+
+
+def render_site(url):
+    """能适配就返回 (是否命中, 文本)"""
+    for pat, fn in SITE_ADAPTERS:
+        if pat.search(url):
+            try:
+                txt = fn(url)
+            except Exception as e:
+                log("adapter fail %s: %s" % (url, e))
+                return True, ""
+            if txt:
+                return True, txt
+            return True, ""
+    return False, ""
 
 
 def _strip(s):
@@ -294,6 +391,53 @@ def _search_bing(q, n):
     return items
 
 
+RENDER_PY = "/opt/dsh/web_render.py"
+RENDER_MIN_FREE_MB = 350      # 可用内存低于这个就不扮浏览器了，别把 QQ 挤掉
+RENDER_TIMEOUT = 50
+
+
+def _mem_available_mb():
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) / 1024.0
+    except Exception:
+        pass
+    return 9999.0
+
+
+def render_page(url, limit=MAX_TEXT, wait_ms=2500):
+    """真浏览器渲染一页（贴吧/知乎这类 SPA 只能这么读）。
+
+    返回 (ok, 文本或原因)。失败不抛异常——浏览器是"增强"，不是必需。
+    """
+    if not os.path.exists(RENDER_PY):
+        return False, "没装渲染器"
+    free = _mem_available_mb()
+    if free < RENDER_MIN_FREE_MB:
+        return False, "可用内存只有 %.0fMB，开浏览器会挤压 QQ，这次不渲染" % free
+    try:
+        r = subprocess.run([sys.executable, RENDER_PY, url, str(wait_ms), str(limit)],
+                           capture_output=True, text=True, timeout=RENDER_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return False, "渲染超时（%ds）" % RENDER_TIMEOUT
+    except Exception as e:
+        return False, "起不来：%s" % str(e)[:100]
+    try:
+        d = json.loads((r.stdout or "").strip().splitlines()[-1])
+    except Exception:
+        return False, "渲染器没给出结果：%s" % ((r.stderr or r.stdout or "")[-160:]).strip()
+    if not d.get("ok"):
+        return False, str(d.get("error") or "渲染失败")[:200]
+    text = (d.get("text") or "").strip()
+    if not text:
+        return False, "渲染完了但还是空的"
+    title = (d.get("title") or "").strip()
+    head = "【%s】%s" % (title, chr(10)) if title and title not in text[:80] else ""
+    return True, head + text
+
+
 def tool_web_search(args):
     q = (args.get("q") or args.get("query") or "").strip()
     if not q:
@@ -343,15 +487,50 @@ def tool_web_get(args):
         return "要给一个 http(s) 开头的网址。"
     limit = int(args.get("max_chars") or MAX_TEXT)
     limit = max(500, min(limit, 20000))
+    if (args.get("render") or "auto").strip().lower() == "always":
+        # 强制渲染：明知道要脚本才出来，省得先白抓一遘
+        ok, rendered = render_page(url, limit)
+        if ok:
+            return rendered
+        return "浏览器渲染失败：%s" % rendered
+    hit, site_text = False, ""
+    try:
+        hit, site_text = render_site(url)
+    except Exception as e:
+        log("render_site fail %s: %s" % (url, e))
+    if hit and site_text.strip():
+        return site_text[:limit]
     try:
         html = fetch(url)
     except Exception as e:
-        log("get fail %s: %s" % (url, e))
-        return "打不开这个网址：%s" % e
+        # 403/反爬时换手机 UA 再试一次（不少站对移动端是服务端渲染）
+        try:
+            html = fetch(url, ua=MOBILE_UA)
+        except Exception as e2:
+            log("get fail %s: %s / %s" % (url, e, e2))
+            # 源码抓不到不代表浏览器打不开（知乎就是 403 但页面能渲染）
+            if (args.get("render") or "auto").strip().lower() != "never":
+                ok, rendered = render_page(url, limit)
+                if ok:
+                    return rendered
+                log("render after fetch-fail %s: %s" % (url, rendered))
+            return "打不开这个网址：%s（浏览器渲染也没成）" % e
     text = clean_text(html, limit)
-    if not text.strip():
-        return "这个页面没有可读正文（可能是脚本渲染的，或者需要登录）。"
-    return text
+    if len(text.strip()) >= 80:
+        return text
+    # 本地抓不到 → 上真浏览器（按需启动，读完就退）
+    want = (args.get("render") or "auto").strip().lower()
+    if want != "never":
+        ok, rendered = render_page(url, limit)
+        if ok:
+            return rendered
+        log("render fallback fail %s: %s" % (url, rendered))
+        return ("这个页面本地读不到正文（%d 字），浏览器渲染也没成：%s。"
+                "换个能直接给出内容的来源，或者搜摘要。原文开头：%s"
+                % (len(text.strip()), rendered, text.strip()[:100]))
+    return ("这个页面基本读不到正文（%d 字）。可能是脚本渲染或者要登录；"
+            "换个能直接给出内容的来源，或者搜一下摘要。原文开头：%s"
+            % (len(text.strip()), text.strip()[:120]))
 
 
 TOOLS = [
@@ -369,12 +548,17 @@ TOOLS = [
     },
     {
         "name": "web_get",
-        "description": "打开一个网页，取它的正文。想读链接里的内容、看原文的时候用。正文太长会截断。",
+        "description": ("打开一个网页，取它的正文。想读链接里的内容、看原文的时候用。"
+                        "普通页面直接抓；贴吧/知乎这类全是脚本渲染的站点会自动开浏览器渲染"
+                        "（慢一些，几秒到十几秒，偶尔还会因为要登录读不到）。正文太长会截断。"),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "url": {"type": "string", "description": "http(s) 网址"},
                 "max_chars": {"type": "integer", "description": "最多返回多少字符，默认 6000"},
+                "render": {"type": "string",
+                           "enum": ["auto", "never", "always"],
+                           "description": "auto=抓不到才开浏览器（默认）；never=只用轻量抓取；always=直接开浏览器"},
             },
             "required": ["url"],
         },

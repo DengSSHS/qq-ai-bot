@@ -340,6 +340,12 @@ tools2, _ = mcp_probe("/opt/dsh/websurf.py")
 (ok if tools2 else bad)("websurf 工具：%s" % ", ".join(tools2))
 tools3, _ = mcp_probe("/opt/dsh/imagen.py")
 (ok if tools3 else bad)("imagen 工具：%s" % ", ".join(tools3))
+# 浏览器兜底是「可选能力」：缺了只是读不了贴吧/知乎这类 SPA 站，别的都正常，
+# 所以算 warn 不算 bad——否则全新机器会因为没装 Chromium 就判整个部署失败。
+_pw = os.path.exists("/root/.cache/ms-playwright") or any(
+    f.startswith("chromium") for f in (os.listdir("/root/.cache/ms-playwright")
+                                       if os.path.isdir("/root/.cache/ms-playwright") else []))
+(warn if not _pw else ok)("浏览器兜底：%s" % ("headless Chromium 已装（能读 SPA 站）" if _pw else "未装，只能抓静态页"))
 
 # ---------------- 7. 记忆 ----------------
 sec("7. 记忆与检索")

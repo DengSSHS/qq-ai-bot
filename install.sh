@@ -20,6 +20,8 @@ NODE_DIR="/opt/node"
 NODE_VER="${NODE_VER:-v24.22.0}"
 DSH_VER="${DSH_VER:-0.2.1-rc.2}"
 NPM_REG="${NPM_REG:-https://registry.npmmirror.com}"
+PIP_REG="${PIP_REG:-https://pypi.tuna.tsinghua.edu.cn/simple}"
+PLAYWRIGHT_HOST="${PLAYWRIGHT_HOST:-https://cdn.npmmirror.com/binaries/playwright}"
 NODE_MIRROR="${NODE_MIRROR:-https://registry.npmmirror.com/-/binary/node}"
 LOG="/var/log/qqbot-install.log"
 (umask 077; touch "$LOG" 2>/dev/null; chmod 600 "$LOG" 2>/dev/null) || true
@@ -290,6 +292,33 @@ if [ ! -f "$DSH_HOME/limits.json" ] && [ -f "$STACK/config/limits.json.tpl" ]; t
   ok "limits.json 已装（每天限制可改：switches.py limits）"
 elif [ -f "$DSH_HOME/limits.json" ]; then
   ok "limits.json 已存在，保持不动"
+fi
+
+# ── 6.5 联网兜底：headless Chromium（可选，失败不影响主流程）───────
+# 为什么装：贴吧/知乎这类整页都是 SPA，源码里只有 <div id="app"></div>，
+# 光抓 HTML 永远读不到正文。web_get 抓不到时会按需起一个 headless Chromium，
+# 读完即退（峰值 ~200MB，所以服务器内存不够时它自己会拒绝启动，不会把 QQ 挤掉）。
+# 装不上也不影响：websurf 会退化成纯轻量抓取，只是读不了 SPA 站点。
+if [ "${SKIP_BROWSER:-0}" != "1" ]; then
+  phase "6.5 联网兜底：headless Chromium（可选）"
+  if python3 -c 'import playwright' 2>/dev/null; then
+    ok "playwright 已装"
+  else
+    run python3 -m pip install -q --break-system-packages --disable-pip-version-check \
+        -i "$PIP_REG" playwright \
+      && ok "playwright 装好" || warn "playwright 没装上（web_get 会退回纯抓取模式）"
+  fi
+  if python3 -c 'import playwright' 2>/dev/null; then
+    if [ ! -d "${HOME}/.cache/ms-playwright" ]; then
+      PLAYWRIGHT_DOWNLOAD_HOST="$PLAYWRIGHT_HOST" python3 -m playwright install chromium \
+        >/dev/null 2>&1 && ok "chromium 下好（约 120MB）" \
+        || warn "chromium 没下下来（web_get 会退回纯抓取模式）"
+    else
+      ok "chromium 已存在"
+    fi
+    python3 -m playwright install-deps chromium >/dev/null 2>&1 \
+      && ok "chromium 系统依赖齐了" || warn "chromium 系统依赖可能缺（apt 不通时常见）"
+  fi
 fi
 
 # ── 7. 配置 ───────────────────────────────────────────────────────────
