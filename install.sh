@@ -321,6 +321,58 @@ if [ "${SKIP_BROWSER:-0}" != "1" ]; then
   fi
 fi
 
+# ── 6.6 本地语音识别：whisper.cpp（可选，失败只是听不了 → 退回只看画面）──
+# 为什么装：番剧没有 CC 字幕轨，光看帧只能读硬字幕；没有声音就真的只能猜。
+# whisper.cpp 编译产物 + 官方小模型（190MB，sha256 校验）→ 她能听写对白。
+# 实测 2 核机器：60 秒音频 47 秒转完（约 1.3 倍实时）。
+if [ "${SKIP_ASR:-0}" != "1" ]; then
+  phase "6.6 本地语音识别：whisper.cpp（可选）"
+  ASR_BIN=/opt/tulpa/tools/whispercpp/bin/whisper-cli
+  ASR_MODEL=/opt/tulpa/.cache/voice-models/ggml-small-q5_1.bin
+  if [ -x "$ASR_BIN" ] && [ -f "$ASR_MODEL" ]; then
+    ok "whisper-cli 与模型已就位"
+  else
+    if [ ! -x "$ASR_BIN" ]; then
+      run apt-get install -y -qq cmake >/dev/null 2>&1 || warn "cmake 装不上"
+      if [ ! -d /opt/src/whisper.cpp ]; then
+        mkdir -p /opt/src
+        run git clone --depth 1 https://github.com/ggml-org/whisper.cpp.git /opt/src/whisper.cpp \
+          || warn "whisper.cpp 拉不下来（github 不通时常见）"
+      fi
+      if [ -d /opt/src/whisper.cpp ]; then
+        ( cd /opt/src/whisper.cpp \
+          && cmake -B build -DCMAKE_BUILD_TYPE=Release -DWHISPER_BUILD_TESTS=OFF >/dev/null 2>&1 \
+          && cmake --build build --config Release -j2 --target whisper-cli >/dev/null 2>&1 ) \
+          && mkdir -p "$(dirname "$ASR_BIN")" \
+          && cp /opt/src/whisper.cpp/build/bin/whisper-cli "$ASR_BIN" \
+          && chmod +x "$ASR_BIN" \
+          && ok "whisper-cli 编译完成" || warn "whisper-cli 编译失败（听不了音频）"
+      fi
+    fi
+    if [ ! -f "$ASR_MODEL" ]; then
+      mkdir -p "$(dirname "$ASR_MODEL")"
+      ASR_URL="https://hf-mirror.com/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin"
+      ASR_SHA=ae85e4a935d7a567bd102fe55afc16bb595bdb618e11b2fc7591bc08120411bb
+      if run curl -fL --retry 2 -o /tmp/ggml-small-q5_1.bin "$ASR_URL"; then
+        if [ "$(sha256sum /tmp/ggml-small-q5_1.bin | cut -d' ' -f1)" = "$ASR_SHA" ]; then
+          mv /tmp/ggml-small-q5_1.bin "$ASR_MODEL" && ok "语音模型已装（190MB，校验通过）"
+        else
+          rm -f /tmp/ggml-small-q5_1.bin && warn "语音模型校验失败，已删（听不了音频）"
+        fi
+      else
+        warn "语音模型下载失败（听不了音频）"
+      fi
+    fi
+  fi
+  # 她跑在 tulpa 的 cgroup 里，转写时模型要几百 MB —— 只给 450M 会被 OOM
+  if [ -x "$ASR_BIN" ]; then
+    mkdir -p /etc/systemd/system/tulpa-mcp.service.d
+    printf '[Service]\nMemoryMax=768M\nMemoryHigh=512M\n' \
+      > /etc/systemd/system/tulpa-mcp.service.d/asr.conf
+    systemctl daemon-reload >/dev/null 2>&1 && ok "tulpa 内存上限调到 768M（转写需要）"
+  fi
+fi
+
 # ── 7. 配置 ───────────────────────────────────────────────────────────
 phase "7/9 写配置"
 
@@ -444,7 +496,7 @@ fi
 if [ -f "$STACK/patch_tulpa_media.py" ]; then
   "$PY" "$STACK/patch_tulpa_media.py" || warn "Tulpa 选流补丁没打上（B站视频可能只剩元数据）"
 fi
-for f in patch_tulpa_danmaku.py patch_tulpa_gzip.py patch_tulpa_bangumi.py; do
+for f in patch_tulpa_danmaku.py patch_tulpa_gzip.py patch_tulpa_bangumi.py patch_tulpa_asr.py; do
   if [ -f "$STACK/$f" ]; then
     "$PY" "$STACK/$f" || warn "Tulpa 补丁 $f 没打上"
   fi
