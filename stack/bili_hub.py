@@ -31,7 +31,8 @@ CONF = os.path.join(BASE, "bili_share.conf.json")
 LOG = os.path.join(BASE, "memory/bili-share.jsonl")
 WATCHED = os.path.join(BASE, "memory/bili-watched.jsonl")
 TULPA_URL = "http://127.0.0.1:18777/mcp"
-TULPA_CONN = "/tmp/conn.json"
+TULPA_CONN = "/opt/dsh/tulpa-conn.json"   # 持久；/tmp 重启会被清空
+TULPA_CONN_FALLBACK = "/tmp/conn.json"
 
 READ_TOOLS = {
     "search_videos": "按关键词搜 B 站视频，返回标题/UP主/时长/BV号",
@@ -63,10 +64,15 @@ def conf():
 
 # ---------------------------------------------------------------- 转发给 Tulpa
 def _tulpa_token():
-    try:
-        return json.load(io.open(TULPA_CONN, encoding="utf-8"))["token"]
-    except Exception:
-        return ""
+    for p in (TULPA_CONN, TULPA_CONN_FALLBACK):
+        try:
+            tok = json.load(io.open(p, encoding="utf-8")).get("token") or ""
+            if tok:
+                return tok
+        except Exception:
+            continue
+    return ""
+
 
 
 def forward(name, args):
@@ -235,9 +241,6 @@ def _read_quality(res):
     Tulpa 在媒体下载失败时仍然返回 state=succeeded，只是字幕空、没有帧、
     evidence_level 掉成 metadata_only（2026-10-25 实测 10 次里 5 次这样）。
     对她来说"成功但空"最坑：她会当成自己看过了。
-
-    反过来，只有帧没有字幕是**合法**结果（有些视频本来没有字幕/CC），
-    所以 entries 和 frames 有一个就算读到了。
     """
     if not isinstance(res, dict) or not res.get("ok"):
         return res
@@ -265,11 +268,7 @@ def _read_quality(res):
 
 
 def wait_job(res, budget_s=30, interval=1.5):
-    """read_video 是异步任务：这里替她把排队等完，省得她手动轮询又等不及。
-
-    2026-10-25 实测：她 2 秒查一次、查 3~4 次就放弃，
-    有个 job 在她最后一次查询之后 6 秒才完成，结果她自己没取到。
-    """
+    """read_video 是异步任务：这里替她把排队等完，省得她手动轮询又等不及。"""
     if not isinstance(res, dict) or not res.get("ok"):
         return res
     job = res.get("job_id")

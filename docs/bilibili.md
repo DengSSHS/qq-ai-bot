@@ -255,3 +255,79 @@ token 预算默认关闭，就是因为这个量级通常不需要限制。
 
 **一个要记住的运维约束**：主人在别处登录这个 B 站号 → 服务器这边立刻掉线。
 要么给她单独的号，要么接受"你用了她就不能用"。
+
+---
+
+## 已知坑：`/tmp` 里的凭据会随重启消失（2026-11-08）
+
+### 症状
+
+```
+她："B站进不去，说没有访问凭据"
+窗口开了也白开
+```
+
+`bili_now` 却一切正常（`can_browse: true`）——因为它只查时间窗，不需要凭据。
+**窗口是开的，但 token 没了，所以读不了内容。**
+
+### 原因
+
+`bili_hub.py` 原来从 `/tmp/conn.json` 读 Tulpa 的 token：
+
+```python
+TULPA_CONN = "/tmp/conn.json"
+```
+
+`/tmp` 在重启时被清空（systemd-tmpfiles），文件没了 → 每次重启后必犯。
+而 Tulpa 库里 `grants.token_hash` **只存哈希**，原文找不回来，只能重新签发。
+
+### 修法（两条都做了）
+
+**1. token 存到持久路径**
+
+```python
+TULPA_CONN = "/opt/dsh/tulpa-conn.json"   # 持久（600 权限）
+TULPA_CONN_FALLBACK = "/tmp/conn.json"    # 兼容老部署
+```
+
+`_tulpa_token()` 依次尝试两个路径，任一有值就用。
+
+**2. 重新签发 token 的方法**（token 丢了才用）
+
+```bash
+cd /opt/tulpa && ./.venv/bin/python - <<'EOF'
+import sys, json, io, os
+sys.path.insert(0, "/opt/tulpa")
+from chatlocal.store import Store
+from chatlocal.mcp_access import MCPAccess
+
+access = MCPAccess(Store("/opt/tulpa/data/chats.sqlite3"))
+out = access.create({
+    "name": "jingjing-bili-relogin",
+    "platforms": ["qq"],
+    "all_conversations": True,     # 少这个会报「请选择会话」
+    "bilibili_read": True,
+})
+io.open("/opt/dsh/tulpa-conn.json", "w", encoding="utf-8").write(
+    json.dumps({"token": out["token"]}) + "\n")
+os.chmod("/opt/dsh/tulpa-conn.json", 0o600)
+print("新 token 已写入")
+EOF
+```
+
+`all_conversations: True` 是必须的，否则报 `请选择会话，或明确允许所选平台的全部会话`。
+
+### 验证
+
+```bash
+cd /opt/dsh && python3 -c "
+import sys; sys.path.insert(0,'/opt/dsh'); import bili_hub, json
+print(json.dumps(bili_hub.call_tool('search_videos', {'query':'鲸鱼','limit':3}), ensure_ascii=False)[:200])"
+```
+
+能返回真实视频列表才算通；`bili_now` 正常不代表凭据有效。
+
+### 备份
+
+`tulpa-conn.json` 已加入 `backup.py` 的 DATA 清单——迁移服务器时不会丢掉这个凭据。
+（它在 Tulpa 侧是可撤销的授权，不是密码，泄露了可以在库里把 grant 吊销重发。）
