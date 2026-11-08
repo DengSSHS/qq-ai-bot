@@ -213,6 +213,16 @@ if [ -f "$PWD/stack/patch_tulpa_media.py" ]; then
     "$PY" "$PWD/stack/patch_tulpa_media.py" || warn "Tulpa 选流补丁没打上（B站视频可能又只剩元数据）"
   fi
 fi
+# 弹幕 + gzip：B站弹幕接口返回压缩 XML，需要两处补丁配合（2026-11-09）
+for f in patch_tulpa_danmaku.py patch_tulpa_gzip.py; do
+  if [ -f "$PWD/stack/$f" ]; then
+    if [ "$DRY" = "1" ]; then
+      "$PY" "$PWD/stack/$f" --check || true
+    else
+      "$PY" "$PWD/stack/$f" || warn "Tulpa 补丁 $f 没打上"
+    fi
+  fi
+done
 
 # ── 5. 重启 ────────────────────────────────────────────────────────────
 say "5/6 重启服务"

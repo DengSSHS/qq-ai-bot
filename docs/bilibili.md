@@ -331,3 +331,49 @@ print(json.dumps(bili_hub.call_tool('search_videos', {'query':'鲸鱼','limit':3
 
 `tulpa-conn.json` 已加入 `backup.py` 的 DATA 清单——迁移服务器时不会丢掉这个凭据。
 （它在 Tulpa 侧是可撤销的授权，不是密码，泄露了可以在库里把 grant 吊销重发。）
+
+---
+
+## 弹幕能力（2026-11-09 新增）
+
+### 为什么加
+
+`read_video` 给她的是「字幕 + 几帧画面」——字幕是台词，**弹幕才是观众反应**。
+"这段大家笑什么""他们在刷什么梗"这类信息，只有弹幕里有。
+
+### 工具
+
+```
+get_video_danmaku(video, page, limit=200)
+→ {ok, bvid, count, items:[{t: 秒, text: "..."}], note}
+```
+
+`limit` 上限 500，超过时**均匀采样**（保留整段时间分布，不是只取前 N 条）。
+
+### 两个 vendor 补丁（都要打，否则读不到）
+
+| 补丁 | 改什么 | 为什么 |
+|---|---|---|
+| `patch_tulpa_danmaku.py` | `net.py` 白名单加 `/x/v1/dm/list.so`；`content.py` 加 `danmaku()`；`tools.py` 注册工具（`assert len(NAMES)==10` 改 11） | 弹幕走独立接口 |
+| `patch_tulpa_gzip.py` | `net.py` 放行并解压 gzip/deflate | 弹幕接口**无视** `Accept-Encoding: identity`，照样返回压缩体，原逻辑直接拒（"上游返回了不支持的压缩响应"） |
+
+两个都幂等、都留 `.bak-*`，且已挂进 `update.sh` / `install.sh`（重装自动重打）。
+
+### 实测
+
+```
+get_video_danmaku("BV1EeHW69Eq6", limit=8)
+→ {"count": 8, "items": [
+     {"t": 0.06,  "text": "666，还有AI版"},
+     {"t": 63.93, "text": "最鲸幻想"},
+     {"t": 84.84, "text": "她们在干嘛？？？"},
+     {"t": 102.28,"text": "救命 发型对上了"},
+     {"t": 119.22,"text": "豆包应该饰演毛利小五郎"},
+     {"t": 132.54,"text": "哈哈哈"}]}
+```
+
+### 注意事项
+
+- 返回里带 `note`：「弹幕是观众反应，不是视频本身的内容」——让她别把弹幕当事实。
+- 弹幕量大的视频要设 `limit`，否则返回体很占 token。
+- 目前**只读**。发弹幕、点赞、私信这类写操作没做，风险见下。

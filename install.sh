@@ -415,6 +415,11 @@ fi
 if [ -f "$STACK/patch_tulpa_media.py" ]; then
   "$PY" "$STACK/patch_tulpa_media.py" || warn "Tulpa 选流补丁没打上（B站视频可能只剩元数据）"
 fi
+for f in patch_tulpa_danmaku.py patch_tulpa_gzip.py; do
+  if [ -f "$STACK/$f" ]; then
+    "$PY" "$STACK/$f" || warn "Tulpa 补丁 $f 没打上"
+  fi
+done
 # npm 会把 local-memory 复制进 node_modules，**运行时读的是那一份**。
 # 只改 profiles/web/local-memory 的话，占位符照样进 MCP 配置，
 # 看图请求会发到 "__VISION_BASE__/chat/completions" —— 她从此看不见任何图片。

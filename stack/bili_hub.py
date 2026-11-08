@@ -44,6 +44,7 @@ READ_TOOLS = {
     "get_video_frames": "取已抽好的画面帧",
     "get_bilibili_status": "B 站登录状态",
     "cancel_video_job": "取消一个读视频任务",
+    "get_video_danmaku": "读一条视频的弹幕（观众反应：哪段在笑、刷什么梗）",
 }
 
 
