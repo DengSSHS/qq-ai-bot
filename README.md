@@ -1,4 +1,4 @@
-<img src="docs/img/banner.png" alt="qq-ai-bot · QQ 群里的 AI 角色" width="100%">
+<img src="docs/img/banner.png" alt="qq-ai-bot · 一个住在 QQ 群里的 AI 角色：会淡忘也会被唤起的记忆、会涨落的心情、读画面硬字幕看番" width="100%">
 
 # qq-ai-bot · 一个住在 QQ 群里的 AI 角色
 
