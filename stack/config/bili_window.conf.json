@@ -10,5 +10,6 @@
  "night_max_auto": 999,
  "auto_minutes": 60,
  "manual_per_day": 999,
- "manual_max_minutes": 600
+ "manual_max_minutes": 600,
+ "nudge_min_gap_min": 90
 }

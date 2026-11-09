@@ -48,6 +48,7 @@ DEFAULTS = {
     # 累积随机：低谷期每多待一小时，"叫醒她"的概率抬高一档，封顶 ramp_cap
     "ramp_per_hour": 0.25,
     "ramp_cap": 0.9,
+    "nudge_min_gap_min": 90,   # 两次"叫她"之间至少隔这么久（2026-11-09 加，防刷屏）
 }
 
 
@@ -273,9 +274,18 @@ def apply():
         if night_used >= night_max:
             return "凌晨叫醒已用 %d/%d（给晚上留额度）" % (night_used, night_max)
     last = st.get("last_auto_ts", 0)
+    # 2026-11-09 实测事故：roll 按「天」固定（当天恒为 0.11），prob ≥ 0.25，
+    # 于是每分钟都满足 roll < prob → 每分钟叫她一次；19:41–19:59 连叫 63 次，
+    # 她每被叫一次就回一句「不刷。」= 刷屏。原来靠"每天 6 次"的上限挡着，
+    # 上限改成 999 后刹车就没了。两道修：掷骰改按小时 + 这里加最小间隔。
+    gap_min = float(cfg.get("nudge_min_gap_min", 90) or 0)
+    if last and (time.time() - last) < gap_min * 60:
+        return "距上次叫她还没到 %.0f 分钟（%.0f 分钟前）" % (
+            gap_min, (time.time() - last) / 60.0)
     hours = max(0.0, (time.time() - last) / 3600.0) if last else 1.0
     prob = min(float(cfg["ramp_cap"]), float(cfg["ramp_per_hour"]) * (1 + hours))
-    roll = _roll("bili_night", time.strftime("%F"))
+    # 按「小时」掷：原来是按天，同一天内 roll 恒定，一次命中就会每小时/每分钟重复命中
+    roll = _roll("bili_night", time.strftime("%F-%H"))
     if roll >= prob:
         return "低谷期，掷出 %.2f >= %.2f，这小时先不叫" % (roll, prob)
     ok = _nudge("（现在是你的时间）去 B 站刷刷吧，看到有意思的记得在评论区 @ 我。")
