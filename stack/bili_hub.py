@@ -519,7 +519,9 @@ def frame_grab(args):
             stamps = [round(duration * (i + 0.5) / count, 2) for i in range(count)]
         else:
             stamps = [60.0 * (i + 1) for i in range(count)]
-    outdir = os.path.join(f["dir"], "grab")
+    # 帧必须放在主人读得到的目录（他的只读范围是 /opt/dsh/media 与 /opt/dsh/workspace）。
+    # 以前放在 /opt/tulpa/data/... 下，他压根打不开——2026-11-09 指出。
+    outdir = os.path.join("/opt/dsh/media/bili-frames/ss%s" % season, "ep%d" % ep)
     os.makedirs(outdir, exist_ok=True)
     saved = []
     for t in stamps:

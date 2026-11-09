@@ -282,7 +282,7 @@ def paths(season, ep):
                 md=os.path.join(d, "ep%d.md" % ep),
                 prog=os.path.join(d, "ep%d.progress" % ep),
                 meta=os.path.join(d, "ep%d.meta.json" % ep),
-                frames=os.path.join(d, "ep%d.frames" % ep))
+                frames=os.path.join("/opt/dsh/media/bili-frames/ss%d" % season, "ep%d" % ep))
 
 
 def read_progress(p):
