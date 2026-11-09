@@ -239,7 +239,16 @@ def run(dry=False):
         if kind == "diary.write":
             cmd = [sys.executable, os.path.join(BASE, "diary_outband.py")]
         elif kind == "chat.initiate":
-            text = gen_line(it.get("hint", ""))
+            # 2026-11-09 用户批评「主动搭话只是机械式一句话、不依据真实天气和当天情况」。
+            # 根因是 hint 全是模板。这里在模板前拼一段**真实素材**（天气/时间/最近聊天/看过什么/日记状态），
+            # 让她有具体的东西可说；取不到就明说取不到，不许编。
+            hint = it.get("hint", "")
+            try:
+                import context_pack
+                hint = context_pack.build(it.get("reason", "")) + chr(10) + chr(10) + hint
+            except Exception as e:
+                log("context_pack 失败（继续用原 hint）：%s" % str(e)[:120])
+            text = gen_line(hint)
             if not text:
                 log("生成失败，跳过 reason=%s" % it.get("reason"))
                 continue
