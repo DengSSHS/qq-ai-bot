@@ -365,7 +365,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--season", default="73077", help="番剧 ss 号（不带 ss 前缀）")
     ap.add_argument("--ep", type=int, default=1, help="第几集（从 1 开始）")
-    ap.add_argument("--window", type=int, default=300, help="每片多少秒，默认 300")
+    # 默认 180 秒：300 秒时第一段窗口就要跑 5 分钟音频（约 3 分钟 CPU），
+    # 一旦有别的任务抢 CPU（实测被拖到 896 秒），外部看到的就是"一直 0%"。
+    ap.add_argument("--window", type=int, default=180, help="每片多少秒，默认 180")
     ap.add_argument("--threads", type=int, default=2, help="whisper 线程数")
     ap.add_argument("--status", action="store_true", help="只看进度")
     ap.add_argument("--recheck", action="store_true",
@@ -422,9 +424,10 @@ def main():
                          os.path.join(p["frames"], "t%05d.jpg" % int(done + length / 2)))
         done += length
         write_progress(p, done)
-        say("  %3.0f%%  [%d–%ds] %d 句  用时 %.0fs  画面:%s"
+        left_s = (duration - done) / max(1e-6, length / max(1.0, time.time() - t0))
+        say("  %3.0f%%  [%d–%ds] %d 句  用时 %.0fs  预计还剩 %.0f 分钟  画面:%s"
             % (done / duration * 100, done - length, done, len(rows), time.time() - t0,
-               "有" if got else "无"))
+               left_s / 60, "有" if got else "无"))
 
     # 收尾：去重 + 标回放 + 导出人看的台词稿
     if not os.path.exists(p["jsonl"]):
