@@ -365,7 +365,8 @@ def wait_job(res, budget_s=30, interval=1.5):
 
 # ---- HUB_WATCH：追番（正片整集 / 断点续传）--------------------------------
 WATCH_DIR = "/opt/tulpa/data/bilibili/watch"
-WATCH_PY = "/opt/dsh/bili_watch_episode.py"
+WATCH_PY = "/opt/dsh/bili_watch_episode.py"          # whisper 回退
+SUBTITLES_PY = "/opt/dsh/bili_watch_subtitles.py"    # 画面字幕 OCR（默认）
 WATCH_PYTHON = "/opt/tulpa/.venv/bin/python"
 WATCH_FFMPEG = ("/opt/tulpa/.venv/lib/python3.13/site-packages/imageio_ffmpeg/binaries/ffmpeg-linux-x86_64-v7.0.2")
 
@@ -425,7 +426,10 @@ def watch_episode(args):
     f = _watch_files(season, ep)
     os.makedirs(f["dir"], exist_ok=True)
     log = io.open(f["log"], "ab")
-    proc = subprocess.Popen([WATCH_PYTHON, WATCH_PY, "--season", str(season), "--ep", str(ep)],
+    # 2026-11-09 用户要求：改用 token 识别（画面硬字幕 OCR），别再啃两核 CPU。
+    # whisper 版（bili_watch_episode.py）保留为回退：OCR 失败或没有画面字幕时用。
+    script = SUBTITLES_PY if os.path.exists(SUBTITLES_PY) else WATCH_PY
+    proc = subprocess.Popen([WATCH_PYTHON, script, "--season", str(season), "--ep", str(ep)],
                             stdout=log, stderr=log, stdin=subprocess.DEVNULL,
                             start_new_session=True, close_fds=True)
     io.open(f["lock"], "w", encoding="utf-8").write(str(proc.pid))
