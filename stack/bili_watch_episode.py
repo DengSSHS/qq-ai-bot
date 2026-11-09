@@ -96,6 +96,9 @@ def export_only(p, info, ep, season):
     rows = [json.loads(x) for x in io.open(p["jsonl"], encoding="utf-8") if x.strip()]
     rows.sort(key=lambda r: r["t0"])
     rows = dedupe(rows)
+    rows, looped = collapse_loops(rows)
+    if looped:
+        say("折叠循环重复 %d 句（打转段只保留一次）" % looped)
     # 过滤后的结果也写回 jsonl，否则 md 和 jsonl 两边对不上（一个是 389 行，一个是 405 行）
     with io.open(p["jsonl"], "w", encoding="utf-8") as fh:
         for r in rows:
@@ -107,6 +110,14 @@ def export_only(p, info, ep, season):
         f.write("# %s · 第 %d 集\n\n" % (info["title"], ep))
         f.write("时长 %.0f 秒；台词 %d 句；来源：本地 whisper 转写（可能误听）。\n"
                 % (duration, len(rows)))
+        f.write(NAME_GLOSSARY + "\n")
+        if looped:
+            f.write("（本集折叠了 %d 句打转重复；时间轴上仍有覆盖）\n" % looped)
+        gaps = find_gaps(rows, duration=duration)
+        if gaps:
+            f.write("以下时间段没有可信转写（片头/片尾曲、纯音乐或静场）——"
+                    "歌词在画面里，用 bili_frame_grab(range_start=, range_end=) 看："
+                    + "、".join("%d–%ds" % (g[0], g[1]) for g in gaps[:8]) + "\n")
         f.write("开头说明：不做自动判定。每集 OP 位置不同，而且 OP 前面常有一小段冷开场正片"
                 "（用户 2026-11-09 指出）；与上一集的台词重合率 %.0f%% 仅供参考。\n"
                 % (head["ratio"] * 100))
@@ -126,14 +137,90 @@ def export_only(p, info, ep, season):
     say("重做完成：%d 句，回放标记 %s → %s" % (len(rows), recap_until or "无", p["md"]))
 
 
+# ==== 2026-11-09 人名归一（用户指出「灯有两个名字，祥子两个拼法」）====
+# 统一成日语片段里最常见的那一种写法，中文译名另附词汇表，方便她对照。
+NAME_MAP = [
+    ("トモリ", "ともり"), ("燈", "灯"), ("高町さん", "高松さん"),
+    ("サキちゃん", "さきちゃん"), ("咲希", "祥子"),
+    ("アノン", "あのん"), ("愛音", "あのん"),
+    ("ソヨ", "そよ"), ("爽世", "そよ"),
+    ("タキ", "たき"), ("立希", "たき"),
+    ("ラナ", "らな"), ("楽名", "楽奈"),
+]
+
+NAME_GLOSSARY = """人名对照（转写里统一用左边日语写法）：
+  ともり = 高松灯 / 高松燈
+  さきちゃん・祥子 = 丰川祥子 / 豊川祥子
+  あのん = 千早爱音 / 千早愛音
+  そよ = 长崎爽世 / 長崎そよ
+  たき = 椎名立希
+  らな = 要乐奈 / 要楽奈
+"""
+
+
+def normalize_names(text):
+    """把同一个角色的多种转写合成一种。长的先替换，避免「サキちゃん」被「サキ」切碎。"""
+    out = str(text or "")
+    for src, dst in sorted(NAME_MAP, key=lambda x: -len(x[0])):
+        if src in out:
+            out = out.replace(src, dst)
+    return out
+
+
 MUSIC_ONLY = re.compile(r"^[\[〔【(（]?\s*[音음]楽\s*[\]〕】)）]?$")
+
+
+def collapse_loops(rows, run_min=4, ratio=0.75):
+    """把「同一句循环刷屏」折成一句（用户指出：中间到片尾会卡住重复，最要命）。
+
+    whisper 在音乐/静音段偶尔会陷进复读，且每次措辞略有差别，
+    精确去重抓不到，所以用相似度串连。返回 (rows, 折叠掉的句数)。
+    """
+    import difflib
+    out, dropped, i = [], 0, 0
+    while i < len(rows):
+        j = i + 1
+        while j < len(rows) and difflib.SequenceMatcher(
+                None, rows[i]["text"], rows[j]["text"]).ratio() > ratio:
+            j += 1
+        if j - i >= run_min:
+            kept = dict(rows[i])
+            kept["looped"] = j - i
+            kept["t1"] = rows[j - 1]["t1"]
+            out.append(kept)
+            dropped += j - i - 1
+            i = j
+        else:
+            out.append(rows[i])
+            i += 1
+    return out, dropped
+
+
+def find_gaps(rows, min_gap=15.0, duration=None):
+    """找出「没有可信转写」的时间段（片头曲、片尾曲、纯音乐、静场）。
+
+    用户指出「片头片尾只有配乐，没歌词」——实测 whisper 在这些段落只给 (音楽)
+    或干脆沉默，而画面里是花体歌词 + 演职员表，OCR 也读不出来（试过 tesseract）。
+    所以这里不假装能识字，只如实标出空段，让她去看画面。
+    """
+    gaps = []
+    if not rows:
+        return gaps
+    if duration and rows[0]["t0"] > min_gap:
+        gaps.append([0.0, rows[0]["t0"]])
+    for a, b in zip(rows, rows[1:]):
+        if b["t0"] - a["t1"] >= min_gap:
+            gaps.append([round(a["t1"], 1), round(b["t0"], 1)])
+    if duration and duration - rows[-1]["t1"] >= min_gap:
+        gaps.append([round(rows[-1]["t1"], 1), round(duration, 1)])
+    return gaps
 
 
 def dedupe(rows):
     """合并连续重复：whisper 打转时会连着吐同一句，只留第一次并记次数。"""
     out = []
     for r in rows:
-        text = (r.get("text") or "").strip()
+        text = normalize_names((r.get("text") or "").strip())
         if MUSIC_ONLY.match(text):          # 纯 "[音楽]" 行没有信息量，丢掉
             continue
         # 退化行：同一个字重复 8 次以上（片头音乐常被转成「ハッハッハッ…」），
@@ -339,6 +426,9 @@ def main():
     lines = [json.loads(x) for x in io.open(p["jsonl"], encoding="utf-8") if x.strip()]
     lines.sort(key=lambda r: r["t0"])
     lines = dedupe(lines)
+    lines, looped = collapse_loops(lines)
+    if looped:
+        say("折叠循环重复 %d 句" % looped)
     head = classify_head(p, int(args.season), args.ep, lines)
     recap_until = head["until"]
     say("开头判定：%s（与上一集重合 %.0f%%）" % (head["kind"], head["ratio"] * 100))
