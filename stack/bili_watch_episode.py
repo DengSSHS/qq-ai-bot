@@ -223,6 +223,13 @@ def dedupe(rows):
         text = normalize_names((r.get("text") or "").strip())
         if MUSIC_ONLY.match(text):          # 纯 "[音楽]" 行没有信息量，丢掉
             continue
+        # 音乐段会被 whisper 转成和弦/拉丁字母噪音（实测 ep6 开头：
+        # 「B E Major 7 B E Major 7 B E F sharp F sharp」「B7…E… F賞…」）。
+        # 判据：几乎没有日文假名/汉字，且拉丁字母占比很高 → 不是台词。
+        _jp = len(re.findall(r"[\u3040-\u30ff\u4e00-\u9fff]", text))
+        _lat = len(re.findall(r"[A-Za-z]", text))
+        if _lat >= 3 and _jp <= 1 and _lat >= len(text) * 0.3:
+            continue
         # 退化行：同一个字重复 8 次以上（片头音乐常被转成「ハッハッハッ…」），
         # 或者去掉括号后不到 2 个字符 —— 没有信息量
         if len(text) >= 8 and len(set(text)) <= 2:
