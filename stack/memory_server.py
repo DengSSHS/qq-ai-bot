@@ -206,6 +206,33 @@ def tool_set_region(args):
     return msg
 
 
+def tool_mem_remember(args):
+    try:
+        import mem_facts
+        got = mem_facts.remember(args.get("text") or "",
+                                 float(args.get("importance") or 0.5))
+    except Exception as e:
+        return "记不下来（%s）" % str(e)[:80]
+    if not got:
+        return "这条没什么值得长期记的，没记。"
+    return "记下了 %d 条：%s" % (len(got), " / ".join(x["memory"][:40] for x in got[:3]))
+
+
+def tool_mem_recall(args):
+    try:
+        import mem_facts
+        rows = mem_facts.recall(args.get("query") or "",
+                                min(10, max(1, int(args.get("n") or 5))))
+    except Exception as e:
+        return "想不起来（%s）" % str(e)[:80]
+    if not rows:
+        return "记忆里没有相关的。"
+    out = []
+    for it in rows:
+        out.append("- %s" % it["memory"])
+    return "想起 %d 条：\n%s" % (len(rows), "\n".join(out))
+
+
 def tool_notes_read(args):
     ensure()
     with open(NOTES, encoding="utf-8") as f:
@@ -320,6 +347,35 @@ TOOLS = [
             "required": ["city"],
         },
     },
+
+    {
+        "name": "mem_remember",
+        "description": ("把值得长期记住的事实记下来（自动抽成一条条中文短句，带重要性）。"
+                        "主人说了他的处境/习惯/计划/在意的事、或者托付过什么，就记。"
+                        "寒暄和一次性的情绪不用记。"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "原话或事件，一两句"},
+                "importance": {"type": "number",
+                               "description": "多重要，0~1；主人托付的/让你印象深的给 0.8 以上"},
+            },
+            "required": ["text"],
+        },
+    },
+    {
+        "name": "mem_recall",
+        "description": ("按意思回忆：给一句话，取回最相关的几条事实（会按相关/新鲜/重要排序）。"
+                        "想起什么就查一次，别凭印象编。被取回的条目会被记一笔「想起过」，下次更容易再想起。"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "现在在想什么，一两句自然语言"},
+                "n": {"type": "integer", "description": "要几条，默认 5，最多 10"},
+            },
+            "required": ["query"],
+        },
+    },
 ]
 
 HANDLERS = {
@@ -330,6 +386,8 @@ HANDLERS = {
     "notes_read": tool_notes_read,
     "notes_write": tool_notes_write,
     "get_region": tool_get_region,
+    "mem_remember": tool_mem_remember,
+    "mem_recall": tool_mem_recall,
     "set_region": tool_set_region,
 }
 
