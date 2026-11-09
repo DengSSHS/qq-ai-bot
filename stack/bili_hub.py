@@ -528,10 +528,12 @@ def frame_grab(args):
     # 以前放在 /opt/tulpa/data/... 下，他压根打不开——2026-11-09 指出。
     # 帧必须落在「主和她都能读」的目录：他读 media / workspace，她读 workspace / media/onebot,
     # 交集只有 workspace —— 2026-11-09 两次踩这个坑（先后放在 tulpa 和 media/bili-frames）。
-    outdir = os.path.join("/opt/dsh/workspace/bili-frames/ss%s" % season, "ep%d" % ep)
-    # 同时留一份到 media/onebot（她的白名单里明确包含这个目录）——
-    # 2026-11-09 实测：只有 workspace 那份时她说读不到，双写最稳。
-    mirror = os.path.join("/opt/dsh/media/onebot/bili-frames/ss%s" % season, "ep%d" % ep)
+    # 闸门真相（dsh-onebot bridge.mediaSendRoots）：
+    #   允许的根 = mediaDir（永远）+ workspace（**仅当本回合发起者是管理员**）。
+    # 所以 workspace 是"有条件允许"，而 mediaDir 才是无条件的那一个。
+    # mediaDir 默认 = <DSH_HOME>/media/onebot —— 主输出放这里，workspace 只作副本。
+    outdir = os.path.join("/opt/dsh/media/onebot/bili-frames/ss%s" % season, "ep%d" % ep)
+    mirror = os.path.join("/opt/dsh/workspace/bili-frames/ss%s" % season, "ep%d" % ep)
     os.makedirs(outdir, exist_ok=True)
     saved = []
     for t in stamps:
@@ -552,7 +554,7 @@ def frame_grab(args):
             # 明确标出她白名单里能读的那份，省得她自己猜
             "mirror_dir": mirror,
             "__images__": [x["path"] for x in saved],
-            "note": "画面里的硬字幕才是最可靠的台词来源。"}
+            "note": "路径都在 media/onebot（本回合一定允许）下，直接读即可；workspace 里也有副本。"}
 
 
 def call_tool(name, args):
