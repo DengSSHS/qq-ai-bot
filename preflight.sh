@@ -52,6 +52,8 @@ for doc in README.md DEPLOY.md MANUAL.md START-HERE.md CONTRIBUTING.md SECURITY.
     case "$ref" in cordis.patch.yml) ref="stack/cordis.patch.yml.tpl" ;; esac
     # 运行时才有的数据文件（部署后在 /opt/dsh 下），不该要求仓库里有
     case "$ref" in stickers.json|extras.json|sticker_full_tags.json|routines.json) continue ;; esac
+    # 同上：记忆/心情这些是跑起来才生成的，仓库里本来就没有
+    case "$ref" in memory/*) continue ;; esac
     if [ ! -e "$ref" ] && [ ! -d "$ref" ] && [ ! -e "stack/$ref" ] && [ ! -e "persona/$ref" ]; then
       fail "$doc references missing: $ref"; missing=$((missing+1))
     fi

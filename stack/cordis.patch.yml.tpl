@@ -146,7 +146,8 @@
     # 接住只算这一条，不进激活窗口：说完就结束，下次还得 @
     casualEngageRate: 0.2         # 群里随机抽消息回一句：两成概率（每小时最多 3 次）
     casualEngageCooldownMs: 60000 # 两次接话的最小间隔
-    stickerNudgeRate: 0              # 2026-10-26 起表情由她自己决定；这个提示是多余的（人设里已经有表情习惯）
+    stickerNudgeRate: 0              # 2026-11-09 主人要求「她自己认为该发才发」：
+                                     # 不走概率提醒，判断标准写在人设（persona 第29-32行）
     casualEngageMaxPerHour: 3     # 把一小时切成 3 格，每格最多接一次
 
     # --- 媒体 ---

@@ -1291,6 +1291,41 @@ def patch_self_state(apply_):
 
 
 
+
+def patch_sticker_soft(apply_):
+    """表情包改成「她自己判断该发才发」（2026-11-09）。
+
+    原来 prompt.js 写的是「尽量先 qq_random_sticker 甩一张」——那是外力催。
+    用户要的是软：她认为该发才发。所以把配额式要求换成判断标准，
+    并且去掉人设里会误伤表情包的「表情」二字（那是禁括号描写的，字面却像禁一切表情）。
+    """
+    p = os.path.join(LIB, "prompt.js")
+    s = rd(p)
+    if "STICKER_SOFT" in s:
+        return "已打"
+    old = ("'- 表情包习惯（重要）：你超爱用表情包，表情库里有上千张"
+           "（分类关键词：鲸鱼娘 / 初音 / doro / 菲比 / 白子 / 塔菲 / 月薪喵 / 贴吧 / b站）。"
+           "正常聊天回复时，尽量先 qq_random_sticker 甩一张合适的表情，再发文字；"
+           "一次回复最多一张，发过就不要重复。"
+           "只有正在执行任务、报错说明、或对方明确不想要表情时才跳过。" + chr(10) + "'")
+    if old not in s:
+        return "跳过（prompt.js 里的表情段落找不到，可能已改版）"
+    if not apply_:
+        return "未打"
+    new = ("// local patch (STICKER_SOFT): 发表情改成她自己判断，不给配额、不催"
+           + chr(10)
+           + "    platform += '- 表情包：表情库里有上千张"
+           "（分类关键词：鲸鱼娘 / 初音 / doro / 菲比 / 白子 / 塔菲 / 月薪喵 / 贴吧 / b站），"
+           "想发就用 qq_random_sticker，一条最多一张、发过别重复。"
+           + chr(10) + "'"
+           + chr(10)
+           + "        + '**发不发你自己判断**：没有配额，也别为了用而用。想说句话就能说清的，就说话；"
+           "真觉得一张图比话贴切时才发。一整段对话一张没发也很正常。"
+           + chr(10) + "'")
+    wr(p, s.replace(old, new, 1))
+    return "已打"
+
+
 def patch_send_retry(apply_):
     """发送重试：掉线/重启那几秒的「not connected」不再直接丢掉消息。
 
@@ -1361,6 +1396,7 @@ PATCHES = [
     ("prompt.js 自主逛 B 站提示", patch_explore_hint),
     ("prompt.js 注入自我认知（人设之后）", patch_self_state),
     ("bridge.js 发送重试（掉线瞬间不丢消息）", patch_send_retry),
+    ("prompt.js 表情改成她自己判断（不给配额）", patch_sticker_soft),
 ]
 
 
