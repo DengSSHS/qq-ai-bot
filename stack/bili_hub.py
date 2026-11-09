@@ -525,7 +525,9 @@ def frame_grab(args):
             stamps = [60.0 * (i + 1) for i in range(count)]
     # 帧必须放在主人读得到的目录（他的只读范围是 /opt/dsh/media 与 /opt/dsh/workspace）。
     # 以前放在 /opt/tulpa/data/... 下，他压根打不开——2026-11-09 指出。
-    outdir = os.path.join("/opt/dsh/media/bili-frames/ss%s" % season, "ep%d" % ep)
+    # 帧必须落在「主和她都能读」的目录：他读 media / workspace，她读 workspace / media/onebot,
+    # 交集只有 workspace —— 2026-11-09 两次踩这个坑（先后放在 tulpa 和 media/bili-frames）。
+    outdir = os.path.join("/opt/dsh/workspace/bili-frames/ss%s" % season, "ep%d" % ep)
     os.makedirs(outdir, exist_ok=True)
     saved = []
     for t in stamps:
