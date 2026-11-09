@@ -177,6 +177,35 @@ def tool_bili_watched(args):
     return "我看过的（最近 %d 条）：%s%s" % (len(out), chr(10), chr(10).join(out))
 
 
+def tool_get_region(args):
+    import region
+    d = region.load()
+    if not d:
+        return "还没记过他在哪个城市（天气现在按湘潭算，不准）。可以问一句，然后用 set_region 记下来。"
+    return "记的是：%s（%.2f, %.2f，%s）" % (d["name"], d["lat"], d["lon"], d.get("updated_at", ""))
+
+
+def tool_set_region(args):
+    import region
+    city = (args.get("city") or "").strip()
+    if not city:
+        return "要给个城市名。"
+    ok, msg = region.set_region(city, args.get("lat"), args.get("lon"), source="对话里记的")
+    if ok:
+        # 天气缓存作废，下一次取就是新城市
+        try:
+            p = os.path.join(BASE, "context-pack-cache.json")
+            if os.path.exists(p):
+                d = json.loads(io.open(p, encoding="utf-8").read())
+                d.pop("weather", None)
+                d.pop("weather_key", None)
+                io.open(p, "w", encoding="utf-8").write(json.dumps(d, ensure_ascii=False))
+        except Exception:
+            pass
+        log("set_region %s" % city)
+    return msg
+
+
 def tool_notes_read(args):
     ensure()
     with open(NOTES, encoding="utf-8") as f:
@@ -271,6 +300,26 @@ TOOLS = [
             "required": ["section", "text"],
         },
     },
+
+    {
+        "name": "get_region",
+        "description": "查主人现在被记在哪座城市（天气按这个算）。没记过就返回没设置。",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "set_region",
+        "description": ("主人说了他在哪个城市（比如「我回家了」「我在长沙」）就调这个记下来，"
+                        "天气会立刻按新城市算。城市名直接写中文，不用经纬度。"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "city": {"type": "string", "description": "城市名，如 湘潭 / 长沙 / 北京"},
+                "lat": {"type": "number", "description": "可选，纬度"},
+                "lon": {"type": "number", "description": "可选，经度"},
+            },
+            "required": ["city"],
+        },
+    },
 ]
 
 HANDLERS = {
@@ -280,6 +329,8 @@ HANDLERS = {
     "bili_watched": tool_bili_watched,
     "notes_read": tool_notes_read,
     "notes_write": tool_notes_write,
+    "get_region": tool_get_region,
+    "set_region": tool_set_region,
 }
 
 

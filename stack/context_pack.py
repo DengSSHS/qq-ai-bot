@@ -35,6 +35,7 @@ import urllib.request
 
 BASE = "/opt/dsh"
 CACHE = os.path.join(BASE, "memory", "context-pack-cache.json")
+DEFAULT_LAT, DEFAULT_LON = 27.83, 112.94   # 未设置地区时按湘潭算，并会提示去问
 LAT, LON = 27.83, 112.94          # 湖南湘潭（用户所在）
 TZ = "Asia%2FShanghai"
 
@@ -63,36 +64,43 @@ def _json(path, default):
 
 
 def weather(cache_minutes=25):
-    """湘潭当前天气；失败返回 None（宁缺勿造）。"""
+    """按 region.json 记的城市取天气；失败返回 None（宁缺勿造）。"""
+    import region
+    reg = region.load()
+    lat = float(reg["lat"]) if reg else DEFAULT_LAT
+    lon = float(reg["lon"]) if reg else DEFAULT_LON
+    key = "%.2f,%.2f" % (lat, lon)
     c = _json(CACHE, {})
     now = time.time()
-    if c.get("weather") and now - float(c.get("weather_ts") or 0) < cache_minutes * 60:
+    if (c.get("weather") and c.get("weather_key") == key
+            and now - float(c.get("weather_ts") or 0) < cache_minutes * 60):
         return c["weather"]
     url = ("https://api.open-meteo.com/v1/forecast?latitude=%s&longitude=%s"
            "&current=temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m"
            "&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max"
-           "&timezone=%s&forecast_days=1" % (LAT, LON, TZ))
+           "&timezone=%s&forecast_days=1" % (lat, lon, TZ))
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "curl/8"})
         with urllib.request.urlopen(req, timeout=12) as r:
             d = json.loads(r.read().decode("utf-8", "replace"))
         cur, day = d.get("current") or {}, d.get("daily") or {}
+        code = cur.get("weather_code")
         w = dict(
+            at=(reg or {}).get("name") or "他那边",
             temp=cur.get("temperature_2m"),
             feels=cur.get("apparent_temperature"),
             humidity=cur.get("relative_humidity_2m"),
             wind=cur.get("wind_speed_10m"),
-            code=cur.get("weather_code"),
-            desc=WMO.get(-1 if cur.get("weather_code") is None else int(cur["weather_code"]), "天气不明"),
+            code=code,
+            desc=WMO.get(-1 if code is None else int(code), "天气不明"),
             tmin=(day.get("temperature_2m_min") or [None])[0],
             tmax=(day.get("temperature_2m_max") or [None])[0],
             rain=(day.get("precipitation_probability_max") or [None])[0],
         )
-        c["weather"], c["weather_ts"] = w, now
+        c["weather"], c["weather_ts"], c["weather_key"] = w, now, key
         io.open(CACHE, "w", encoding="utf-8").write(json.dumps(c, ensure_ascii=False))
         return w
-    except Exception as e:
-        # 拿不到就返回旧值，别编
+    except Exception:
         old = c.get("weather")
         if old:
             old = dict(old)
@@ -220,40 +228,83 @@ def body_state():
         return ""
 
 
+def memory_topics(n=3):
+    """从记忆里捞可聊的具体事：最近日记两条 + 长期笔记的小标题。"""
+    out = []
+    d = os.path.join(BASE, "memory/diary")
+    try:
+        files = sorted(f for f in os.listdir(d) if f.endswith(".md"))[-2:]
+        for f in files:
+            body = _read(os.path.join(d, f), "") or ""
+            for line in body.split("\n"):
+                line = line.strip()
+                if line.startswith("- ") and len(line) > 12:
+                    out.append(line[2:80])
+    except Exception:
+        pass
+    notes = _read(os.path.join(BASE, "memory/notes.md"), "") or ""
+    for line in notes.split("\n"):
+        if line.startswith("## "):
+            out.append("笔记：" + line[3:40])
+    # 去重、去太久的重复，保留最近的
+    seen, keep = set(), []
+    for x in reversed(out):
+        if x in seen:
+            continue
+        seen.add(x)
+        keep.append(x)
+        if len(keep) >= n:
+            break
+    return list(reversed(keep))
+
+
 def build(reason=""):
     """拼出一段"真实素材"，给主动搭话当依据。"""
+    import region
     now = time.localtime()
     wk = "周一二三四五六日"[now.tm_wday]
     lines = ["【现在是真实信息，不是说给你听的话】",
              "时间：%s %s %d:%02d" % (time.strftime("%F", now), wk, now.tm_hour, now.tm_min)]
+
+    reg = region.load()
+    if not reg:
+        lines.append("地区：还不知道他现在在哪个城市（天气先按湘潭算，可能不准）。"
+                     "可以顺口问一句「你现在在哪个城市 / 回家了没」，问到了用 set_region 记下来。")
+
     w = weather()
     if w and w.get("temp") is not None:
-        lines.append("湘潭天气：%s %s°C（体感 %s°C），今天 %s~%s°C，降水概率 %s%%，湿度 %s%%%s"
-                     % (w.get("desc"), w.get("temp"), w.get("feels"),
+        lines.append("%s天气：%s %s°C（体感 %s°C），今天 %s~%s°C，降水概率 %s%%，湿度 %s%%%s"
+                     % (w.get("at") or "他那边", w.get("desc"), w.get("temp"), w.get("feels"),
                         w.get("tmin"), w.get("tmax"), w.get("rain"), w.get("humidity"),
-                        "（这条是旧数据）" if w.get("stale") else ""))
+                        "（旧数据）" if w.get("stale") else ""))
     else:
-        lines.append("湘潭天气：这次没取到（不要编天气）")
+        lines.append("天气：这次没取到（不要编）")
+
     ch = chat_today()
     if ch["user"]:
-        lines.append("最近他说过：%s" % " / ".join(ch["user"]))
+        lines.append("他最近说过：%s" % " / ".join(ch["user"]))
     else:
-        # 不要留空让人瞎猜：明确说"没听到他说什么"，她就知道别假装知道
-        lines.append("最近他没跟你说什么（别假装知道他在干嘛）")
-    if ch["count"]:
-        lines.append("你这边最近三小时有 %d 条动静" % ch["count"])
+        lines.append("他最近没跟你说什么（别假装知道他在干嘛）")
+
     rec = read_recent()
     if rec:
-        lines.append("最近看过：%s" % " / ".join(rec))
+        lines.append("你最近看过：%s" % " / ".join(rec))
+
+    topics = memory_topics()
+    if topics:
+        lines.append("记忆里能接着聊的：%s" % " / ".join(topics))
+
     d = diary_state()
-    lines.append("日记：%s%s" % ("今天已经写过" if d["wrote_today"] else "今天还没写",
+    lines.append("日记：%s%s" % ("今天写过" if d["wrote_today"] else "今天还没写",
                               ("；上次落尾：" + d["last_line"]) if d["last_line"] else ""))
     b = body_state()
     if b:
         lines.append("你的状态：%s" % b)
+
     lines.append("")
-    lines.append("要求：上面是真实情况。挑其中**一件具体的**（比如他现在冷不冷、刚才聊到哪、"
-                 "你看到的东西）说一句，带上真实细节；没有具体依据就宁可不发，不要凑话。")
+    lines.append("要求：上面是真实情况。挑**一件具体的**说一句——比如他那边冷不冷、最近看过的东西、"
+                 "记忆里没聊完的事；如果连一件具体的都挑不出来，而且还没问过他在哪个城市，就问这个。"
+                 "没有依据就宁可不发，不要凑话。")
     return "\n".join(lines)
 
 
