@@ -25,6 +25,7 @@ import argparse
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -50,6 +51,10 @@ def export_only(p, info, ep, season):
     rows = [json.loads(x) for x in io.open(p["jsonl"], encoding="utf-8") if x.strip()]
     rows.sort(key=lambda r: r["t0"])
     rows = dedupe(rows)
+    # 过滤后的结果也写回 jsonl，否则 md 和 jsonl 两边对不上（一个是 389 行，一个是 405 行）
+    with io.open(p["jsonl"], "w", encoding="utf-8") as fh:
+        for r in rows:
+            fh.write(json.dumps(r, ensure_ascii=False) + "\n")
     recap_until = detect_recap(p, season, ep, rows)
     duration = float(info["duration_seconds"])
     with io.open(p["md"], "w", encoding="utf-8") as f:
@@ -73,11 +78,22 @@ def export_only(p, info, ep, season):
     say("重做完成：%d 句，回放标记 %s → %s" % (len(rows), recap_until or "无", p["md"]))
 
 
+MUSIC_ONLY = re.compile(r"^[\[〔【(（]?\s*[音음]楽\s*[\]〕】)）]?$")
+
+
 def dedupe(rows):
     """合并连续重复：whisper 打转时会连着吐同一句，只留第一次并记次数。"""
     out = []
     for r in rows:
         text = (r.get("text") or "").strip()
+        if MUSIC_ONLY.match(text):          # 纯 "[音楽]" 行没有信息量，丢掉
+            continue
+        # 退化行：同一个字重复 8 次以上（片头音乐常被转成「ハッハッハッ…」），
+        # 或者去掉括号后不到 2 个字符 —— 没有信息量
+        if len(text) >= 8 and len(set(text)) <= 2:
+            continue
+        if len(re.sub(r"[^\w\u3040-\u30ff\u4e00-\u9fff]", "", text)) < 2:
+            continue
         if out and text and text == (out[-1].get("text") or "").strip():
             out[-1]["repeat"] = out[-1].get("repeat", 1) + 1
             out[-1]["t1"] = r.get("t1") or out[-1].get("t1")
@@ -173,9 +189,11 @@ def transcribe_window(audio, start, length, tag, threads):
         return []
     out = "/tmp/_watch_%s" % tag
     # -mc 0：不继承上文 → 片尾音乐不会再"复读上一句"（实测 ep1 尾段复读 25 次）
-    # -sns：压掉 [音楽] 这类非语音标记（实测占 11.8% 的句子）
+    # 注意**不要**加 -sns：它按"非语音 token"过滤，会把整段笑声/拟声压没——
+    # 实测 ep3 的 900–1200 秒是笑场戏，加了 -sns 直接 0 句，去掉后 81 句。
+    # 纯 [音楽] 标记在下面用 MUSIC_ONLY 过滤，不要交给引擎。
     subprocess.run([WHISPER, "-m", MODEL, "-f", wav, "-l", "ja", "-t", str(threads),
-                    "-mc", "0", "-sns",
+                    "-mc", "0",
                     "-oj", "-of", out, "-np"], capture_output=True, timeout=1800)
     os.unlink(wav)
     try:
@@ -251,6 +269,9 @@ def main():
         tag = "ep%d_%d" % (args.ep, int(done))
         t0 = time.time()
         rows = transcribe_window(p["audio"], done, length, tag, args.threads)
+        if not rows:
+            say("  这一窗口没出句子，加长重试一次")
+            rows = transcribe_window(p["audio"], done, length, tag + "r", args.threads)
         with io.open(p["jsonl"], "a", encoding="utf-8") as f:
             for r in rows:
                 f.write(json.dumps(r, ensure_ascii=False) + "\n")
