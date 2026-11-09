@@ -43,6 +43,51 @@ WHISPER = "/opt/tulpa/tools/whispercpp/bin/whisper-cli"
 MODEL = "/opt/tulpa/.cache/voice-models/ggml-small-q5_1.bin"
 
 
+def classify_head(p, season, ep, rows):
+    """判断开头 0–90 秒到底是什么：片头曲 / 上集回放 / 直接进剧情。
+
+    为什么要分：4-gram 重合会把「片头曲」误判成「上集回放」——
+    每集的 OP 是同一首歌，歌词当然和上一集高度重合（实测 ep3 对 ep2 是 47%）。
+    真正的回放素材来自上一集**正片中间**，而 OP 会出现在每集的**同一位置**。
+    所以多比一次「同位置」：
+      · 与上集同位置(0–90s) 重合 ≥50% → 是同一首片头曲
+      · 否则与上集整片重合 ≥30%     → 判为上集回放
+    """
+    if ep <= 1 or not rows:
+        return dict(kind="无（第 1 集）", until=0, ratio=0.0)
+    prev_p = os.path.join(os.path.dirname(p["jsonl"]), "ep%d.jsonl" % (ep - 1))
+    if not os.path.exists(prev_p):
+        return dict(kind="无法比对（上一集没转写）", until=0, ratio=0.0)
+    try:
+        prows = [json.loads(x) for x in io.open(prev_p, encoding="utf-8") if x.strip()]
+    except Exception:
+        return dict(kind="无法比对（上一集稿损坏）", until=0, ratio=0.0)
+    if not prows:
+        return dict(kind="无法比对", until=0, ratio=0.0)
+
+    head = _norm("".join(r["text"] for r in rows if float(r["t0"]) < 90))
+    if len(head) < 40:
+        return dict(kind="开头几乎没台词", until=0, ratio=0.0)
+    g = {head[i:i + 4] for i in range(len(head) - 3)}
+
+    prev_head = _norm("".join(r["text"] for r in prows if float(r["t0"]) < 90))
+    pg = {prev_head[i:i + 4] for i in range(len(prev_head) - 3)}
+    same_pos = (sum(1 for x in g if x in pg) / max(1, len(g))) if pg else 0.0
+
+    prev_all = _norm("".join(r["text"] for r in prows))
+    anywhere = sum(1 for x in g if x in prev_all) / max(1, len(g))
+
+    # 文本分不清「片头曲」和「上集回放」：实测 ep3 开头是 OP（画面里滚着制作人员表），
+    # 但因为 ep2 正片里有一场同一首歌的 live，歌词 4-gram 重合 28%，会被误判成回放。
+    # 所以文本只用来给"重合率"，是否成立交给画面证据（见 look_head）。
+    if same_pos >= 0.5:
+        return dict(kind="片头曲（与上一集同一首）", until=0, ratio=round(same_pos, 3))
+    if anywhere >= 0.30:
+        return dict(kind="与上一集有重合，但需看画面才能确认是回放还是剧情里的同一场演出",
+                    until=0, ratio=round(anywhere, 3), candidate_recap=True)
+    return dict(kind="直接进剧情", until=0, ratio=round(anywhere, 3))
+
+
 def export_only(p, info, ep, season):
     """只重做收尾：去重 + 回放判定 + 写 md（不重新转写）。"""
     if not os.path.exists(p["jsonl"]):
@@ -55,14 +100,14 @@ def export_only(p, info, ep, season):
     with io.open(p["jsonl"], "w", encoding="utf-8") as fh:
         for r in rows:
             fh.write(json.dumps(r, ensure_ascii=False) + "\n")
-    recap_until = detect_recap(p, season, ep, rows)
+    head = classify_head(p, season, ep, rows)
+    recap_until = head["until"]
     duration = float(info["duration_seconds"])
     with io.open(p["md"], "w", encoding="utf-8") as f:
         f.write("# %s · 第 %d 集\n\n" % (info["title"], ep))
         f.write("时长 %.0f 秒；台词 %d 句；来源：本地 whisper 转写（可能误听）。\n"
                 % (duration, len(rows)))
-        if recap_until:
-            f.write("开头 0–%d 秒疑似上一集回放，已标注。\n" % recap_until)
+        f.write("开头判定：%s（与上一集重合 %.0f%%）\n" % (head["kind"], head["ratio"] * 100))
         f.write("\n")
         for r in rows:
             mark = "（上集回放）" if recap_until and r["t0"] < recap_until else ""
@@ -73,7 +118,8 @@ def export_only(p, info, ep, season):
     except Exception:
         pass
     meta.update(title=info["title"], duration=duration, ep=ep, season=season,
-                recap_until=recap_until, lines=len(rows))
+                recap_until=recap_until, head_kind=head["kind"],
+                head_overlap=head["ratio"], lines=len(rows))
     io.open(p["meta"], "w", encoding="utf-8").write(json.dumps(meta, ensure_ascii=False))
     say("重做完成：%d 句，回放标记 %s → %s" % (len(rows), recap_until or "无", p["md"]))
 
@@ -291,9 +337,10 @@ def main():
     lines = [json.loads(x) for x in io.open(p["jsonl"], encoding="utf-8") if x.strip()]
     lines.sort(key=lambda r: r["t0"])
     lines = dedupe(lines)
-    recap_until = detect_recap(p, int(args.season), args.ep, lines)
-    if recap_until:
-        say("开头 0–%d 秒疑似上一集的回放，已标记" % recap_until)
+    head = classify_head(p, int(args.season), args.ep, lines)
+    recap_until = head["until"]
+    say("开头判定：%s（与上一集重合 %.0f%%）" % (head["kind"], head["ratio"] * 100))
+
     meta = json.loads(io.open(p["meta"], encoding="utf-8").read())
     meta["recap_until"] = recap_until
     meta["lines"] = len(lines)
