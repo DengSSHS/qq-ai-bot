@@ -1,10 +1,14 @@
 {
+ "_note": "无限制模式（2026-11-09 主人要求）：全天可刷、自动/手动开窗不限次数。想收回就改回 allowed_windows=[[\"18:00\",\"08:00\"]]，并把 999 调小。",
  "allowed_windows": [
   [
-   "18:00",
-   "08:00"
+   "00:00",
+   "23:59"
   ]
  ],
- "daily_auto_opens": 6,
- "night_max_auto": 2
+ "daily_auto_opens": 999,
+ "night_max_auto": 999,
+ "auto_minutes": 60,
+ "manual_per_day": 999,
+ "manual_max_minutes": 600
 }

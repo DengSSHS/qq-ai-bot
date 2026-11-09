@@ -39,12 +39,12 @@ TULPA = "/opt/tulpa"
 
 # 低谷时段：跨零点写成 ["18:00", "08:00"]（2026-10-25 从 23:30 提前到 18:00）
 DEFAULTS = {
-    "allowed_windows": [["18:00", "08:00"]],
-    "daily_auto_opens": 6,      # 低谷期每天最多自动开几次
-    "night_max_auto": 2,       # 其中 00:00-08:00 最多几次（给晚上留额度）      # 低谷期每天最多自动开几次（每次都受下面时长限制）
+    "allowed_windows": [["00:00", "23:59"]],
+    "daily_auto_opens": 999,    # 2026-11-09 主人要求无限制（原 6）；想收回改成 6 并把窗口改回 18:00-08:00
+    "night_max_auto": 999,     # 同上，无限制模式      # 低谷期每天最多自动开几次（每次都受下面时长限制）
     "auto_minutes": 25,         # 自动开窗时长
-    "manual_per_day": 2,        # 每天最多手动开几次
-    "manual_max_minutes": 60,
+    "manual_per_day": 999,      # 无限制模式（原 2）
+    "manual_max_minutes": 600,
     # 累积随机：低谷期每多待一小时，"叫醒她"的概率抬高一档，封顶 ramp_cap
     "ramp_per_hour": 0.25,
     "ramp_cap": 0.9,
