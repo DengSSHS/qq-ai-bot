@@ -42,6 +42,37 @@ WHISPER = "/opt/tulpa/tools/whispercpp/bin/whisper-cli"
 MODEL = "/opt/tulpa/.cache/voice-models/ggml-small-q5_1.bin"
 
 
+def export_only(p, info, ep, season):
+    """只重做收尾：去重 + 回放判定 + 写 md（不重新转写）。"""
+    if not os.path.exists(p["jsonl"]):
+        say("没有 jsonl，无法重做")
+        return
+    rows = [json.loads(x) for x in io.open(p["jsonl"], encoding="utf-8") if x.strip()]
+    rows.sort(key=lambda r: r["t0"])
+    rows = dedupe(rows)
+    recap_until = detect_recap(p, season, ep, rows)
+    duration = float(info["duration_seconds"])
+    with io.open(p["md"], "w", encoding="utf-8") as f:
+        f.write("# %s · 第 %d 集\n\n" % (info["title"], ep))
+        f.write("时长 %.0f 秒；台词 %d 句；来源：本地 whisper 转写（可能误听）。\n"
+                % (duration, len(rows)))
+        if recap_until:
+            f.write("开头 0–%d 秒疑似上一集回放，已标注。\n" % recap_until)
+        f.write("\n")
+        for r in rows:
+            mark = "（上集回放）" if recap_until and r["t0"] < recap_until else ""
+            f.write("[%02d:%02d] %s%s\n" % (r["t0"] // 60, r["t0"] % 60, r["text"], mark))
+    meta = {}
+    try:
+        meta = json.loads(io.open(p["meta"], encoding="utf-8").read())
+    except Exception:
+        pass
+    meta.update(title=info["title"], duration=duration, ep=ep, season=season,
+                recap_until=recap_until, lines=len(rows))
+    io.open(p["meta"], "w", encoding="utf-8").write(json.dumps(meta, ensure_ascii=False))
+    say("重做完成：%d 句，回放标记 %s → %s" % (len(rows), recap_until or "无", p["md"]))
+
+
 def dedupe(rows):
     """合并连续重复：whisper 打转时会连着吐同一句，只留第一次并记次数。"""
     out = []
@@ -72,8 +103,8 @@ def detect_recap(p, season, ep, lines):
         return 0
     if not prows:
         return 0
-    tail = _norm("".join(r.get("text", "") for r in prows if float(r.get("t0") or 0) > max(
-        0, max(float(x.get("t0") or 0) for x in prows) - 120)))
+    # 和上一集整片比：回放取的是上集高潮画面，可能在中段而不在片尾
+    tail = _norm("".join(r.get("text", "") for r in prows))
     head = _norm("".join(r.get("text", "") for r in lines if float(r.get("t0") or 0) < 90))
     if len(head) < 40 or len(tail) < 40:
         return 0
@@ -81,7 +112,7 @@ def detect_recap(p, season, ep, lines):
     grams = {head[i:i + 4] for i in range(len(head) - 3)}
     hit = sum(1 for g in grams if g in tail)
     ratio = hit / max(1, len(grams))
-    return 90 if ratio >= 0.25 else 0
+    return 90 if ratio >= 0.30 else 0
 
 
 def say(msg):
@@ -91,9 +122,11 @@ def say(msg):
 def paths(season, ep):
     d = os.path.join(WATCH, "ss%d" % season)
     os.makedirs(d, exist_ok=True)
+    # 媒体必须按集存！以前是 ss 目录下一份 audio.m4a，ensure_media 见文件存在就跳过，
+    # 结果第 2 集开始全部转的都是第 1 集的音轨（实测 ep2/ep3 的 jsonl md5 完全相同）。
     return dict(dir=d,
-                audio=os.path.join(d, "audio.m4a"),
-                video=os.path.join(d, "video.mp4"),
+                audio=os.path.join(d, "ep%d.audio.m4a" % ep),
+                video=os.path.join(d, "ep%d.video.mp4" % ep),
                 jsonl=os.path.join(d, "ep%d.jsonl" % ep),
                 md=os.path.join(d, "ep%d.md" % ep),
                 prog=os.path.join(d, "ep%d.progress" % ep),
@@ -175,13 +208,15 @@ def main():
     ap.add_argument("--window", type=int, default=300, help="每片多少秒，默认 300")
     ap.add_argument("--threads", type=int, default=2, help="whisper 线程数")
     ap.add_argument("--status", action="store_true", help="只看进度")
+    ap.add_argument("--recheck", action="store_true",
+                    help="不重新转写，只重跑去重/回放标记/导出 md")
     ap.add_argument("--redo", action="store_true",
                     help="重转这一集（换了参数/修了 bug 之后用）")
     args = ap.parse_args()
 
     p = paths(int(args.season), args.ep)
     if args.redo:
-        for key in ("jsonl", "progress", "md"):
+        for key in ("jsonl", "prog", "md"):      # 键名是 prog（不是 progress）
             target = p.get(key)
             if target and os.path.exists(target):
                 os.unlink(target)
@@ -202,6 +237,10 @@ def main():
     io.open(p["meta"], "w", encoding="utf-8").write(json.dumps(
         dict(title=info["title"], duration=duration, ep=args.ep,
              season=int(args.season), ep_id=info.get("ep_id")), ensure_ascii=False))
+
+    if args.recheck:
+        export_only(p, info, args.ep, int(args.season))
+        return 0
 
     say("第 %d 集《%s》 %.0f 秒，已看到 %.0f 秒（%.0f%%）"
         % (args.ep, info["title"], duration, done, done / duration * 100))
@@ -225,6 +264,9 @@ def main():
                "有" if got else "无"))
 
     # 收尾：去重 + 标回放 + 导出人看的台词稿
+    if not os.path.exists(p["jsonl"]):
+        say("没有产生任何台词（转写窗口没跑或全部失败）——先查 /tmp 日志")
+        return 1
     lines = [json.loads(x) for x in io.open(p["jsonl"], encoding="utf-8") if x.strip()]
     lines.sort(key=lambda r: r["t0"])
     lines = dedupe(lines)

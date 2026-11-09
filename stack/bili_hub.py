@@ -465,7 +465,11 @@ def frame_grab(args):
     times = args.get("times") or []
     count = max(1, min(int(args.get("count") or 4), 8))
     f = _watch_files(season, ep)
-    video = os.path.join(f["dir"], "video.mp4")
+    video = os.path.join(f["dir"], "ep%d.video.mp4" % ep)
+    if not os.path.exists(video):                      # 兼容旧版按季存的文件
+        legacy = os.path.join(f["dir"], "video.mp4")
+        if ep == 1 and os.path.exists(legacy):
+            video = legacy
     if not os.path.exists(video):
         return {"ok": False,
                 "error": {"code": "no_media",
