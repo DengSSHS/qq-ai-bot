@@ -83,11 +83,19 @@ def ocr_frame(path, model="qwen3.5-ocr", timeout=120):
     return text.strip(), tokens
 
 
-def grab(video, t, path):
+def grab(video, t, path, width=640):
     subprocess.run([FF, "-nostdin", "-v", "error", "-ss", str(t), "-i", video, "-frames:v", "1",
-                    "-vf", "crop=iw:ih*0.26:0:ih*0.74,scale=1280:-2", "-q:v", "3", "-y", path],
+                    "-vf", "crop=iw:ih*0.26:0:ih*0.74,scale=%d:-2" % width, "-q:v", "3", "-y", path],
                    capture_output=True, timeout=90)
     return os.path.exists(path) and os.path.getsize(path) > 2000
+
+
+def band_sig(video, t):
+    """字幕带的 16x16 灰度指纹：和上一帧一样就不用再花 token 问一遍。"""
+    r = subprocess.run([FF, "-nostdin", "-v", "error", "-ss", str(t), "-i", video, "-frames:v", "1",
+                        "-vf", "crop=iw:ih*0.26:0:ih*0.74,scale=16:16,format=gray",
+                        "-f", "rawvideo", "-"], capture_output=True, timeout=60)
+    return r.stdout
 
 
 NOISE = re.compile(
@@ -124,6 +132,10 @@ def main():
     ap.add_argument("--ep", type=int, required=True)
     ap.add_argument("--step", type=float, default=2.0, help="每几秒抓一帧")
     ap.add_argument("--workers", type=int, default=8)
+    # 2026-11-09 实测：1280 宽 274 token/帧，640 宽 94 token/帧，文本 15/17 一致。
+    ap.add_argument("--width", type=int, default=640, help="字幕带缩放宽度，默认 640（省 64%% token）")
+    ap.add_argument("--dup-diff", type=float, default=2.0,
+                    help="字幕带像素平均差小于这个值就当作同一句，跳过 OCR")
     ap.add_argument("--max-minutes", type=int, default=240)
     args = ap.parse_args()
 
@@ -165,29 +177,41 @@ def main():
     say("ep%d《%s》 %.0f 秒，每 %.1f 秒一帧 → %d 帧，%d 路并发"
         % (args.ep, meta.get("title", ""), duration, args.step, len(times), args.workers))
 
-    started, spent_tokens, done = time.time(), 0, 0
+    started, spent_tokens, done, prev_t = time.time(), 0, 0, None
     results = {}
 
     def work(t):
         path = "/tmp/_sub_%d_%d.jpg" % (args.ep, int(t))
-        if not grab(video, t, path):
-            return t, "", 0
+        if not grab(video, t, path, args.width):
+            return t, None, 0, None      # None = 这帧没有可用画面
+        sig = band_sig(video, t)
         try:
             text, tok = ocr_frame(path)
-        except Exception as e:
-            return t, "", 0
+        except Exception:
+            return t, None, 0, sig
         finally:
             try:
                 os.unlink(path)
             except OSError:
                 pass
-        return t, clean(text), tok
+        return t, clean(text), tok, sig
 
+    prev_sig, skipped = None, 0
     with cf.ThreadPoolExecutor(max_workers=args.workers) as ex:
-        for tt, text, tok in ex.map(work, times):
-            results[tt] = text
-            spent_tokens += tok
+        for tt, text, tok, sig in ex.map(work, times):
             done += 1
+            if sig is not None and prev_sig is not None and len(sig) == len(prev_sig):
+                diff = sum(abs(a - b) for a, b in zip(sig, prev_sig)) / max(1, len(sig))
+                if diff < args.dup_diff:
+                    # 字幕带没变 → 同一句，直接复用上一帧的结果，不花 token
+                    results[tt] = results.get(prev_t, "")
+                    prev_t, prev_sig = tt, sig
+                    skipped += 1
+                    continue
+            prev_sig = sig
+            prev_t = tt
+            results[tt] = text if text is not None else ""
+            spent_tokens += tok
             if done % 60 == 0:
                 el = time.time() - started
                 say("  %3.0f%%  %d/%d 帧  token %dk  已用 %.0f 分  预计还剩 %.0f 分"
@@ -224,10 +248,11 @@ def main():
             f.write("[%02d:%02d] %s\n" % (int(r["t0"]) // 60, int(r["t0"]) % 60, r["text"]))
 
     meta.update(lines=len(rows), source="subtitle_ocr", step=args.step,
-                tokens=spent_tokens, ocr_at=time.strftime("%F %T"))
+                tokens=spent_tokens, skipped_frames=skipped, width=args.width,
+                ocr_at=time.strftime("%F %T"))
     io.open(meta_p, "w", encoding="utf-8").write(json.dumps(meta, ensure_ascii=False))
-    say("完成：%d 条字幕，token %dk，用时 %.0f 分 → %s"
-        % (len(rows), spent_tokens // 1000, (time.time() - started) / 60, md))
+    say("完成：%d 条字幕，token %dk，跳过 %d 帧（画面未变），用时 %.0f 分 → %s"
+        % (len(rows), spent_tokens // 1000, skipped, (time.time() - started) / 60, md))
     log("ep%d season=%s frames=%d tokens=%d lines=%d"
         % (args.ep, args.season, len(results), spent_tokens, len(rows)))
     return 0

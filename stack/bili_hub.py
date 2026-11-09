@@ -278,6 +278,15 @@ TOOLS.extend([{
                                    "range_end": {"type": "number",
                                                  "description": "只看某一段时给终点秒数（如 240）"}},
                     "required": ["ep"]},
+}, {
+    "name": "bili_ep_report",
+    "description": ("拿某一集的**内部报告**（便宜模型从字幕稿压出来的 600 字：主线/名场面/情绪走向/"
+                    "值得跟他提的点）。比读整集字幕省 token；没有就现生成。"),
+    "inputSchema": {"type": "object",
+                    "properties": {"season": {"type": "integer", "description": "番剧 ss 号，默认 73077"},
+                                   "ep": {"type": "integer"},
+                                   "refresh": {"type": "boolean", "description": "强制重生成"}},
+                    "required": ["ep"]},
 }])
 
 
@@ -469,6 +478,32 @@ def watch_read(args):
             "note": "本地转写，可能误听；时间码是绝对秒数。"}
 
 
+def ep_report(args):
+    """取/生成某一集的内部报告（便宜模型压缩，主模型只读 600 字）。"""
+    season = int(args.get("season") or 73077)
+    ep = int(args.get("ep") or 1)
+    f = _watch_files(season, ep)
+    path = "/opt/tulpa/data/bilibili/watch/ss%d/ep%d.report.md" % (season, ep)
+    need = args.get("refresh") or not os.path.exists(path)
+    if need:
+        if not os.path.exists(f["jsonl"]):
+            return {"ok": False, "error": {"code": "no_transcript",
+                                           "message": "这一集还没有字幕稿，先 bili_watch_episode"}}
+        cmd = [WATCH_PYTHON, "/opt/dsh/bili_ep_report.py", "--season", str(season), "--ep", str(ep)]
+        if args.get("refresh"):
+            cmd.append("--refresh")
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        if not os.path.exists(path):
+            return {"ok": False, "error": {"code": "report_failed",
+                                           "message": (r.stdout or r.stderr)[-200:]}}
+    try:
+        body = io.open(path, encoding="utf-8").read()
+    except Exception as e:
+        return {"ok": False, "error": {"code": "read_failed", "message": str(e)[:100]}}
+    return {"ok": True, "ep": ep, "path": path, "report": body[:4000],
+            "note": "这是便宜模型压过的报告，细节要核对就去 bili_watch_read 读原文。"}
+
+
 def frame_grab(args):
     """抠几张画面给她看：番剧的硬字幕就在画面里，比转写靠谱。"""
     season = int(args.get("season") or 73077)
@@ -569,6 +604,8 @@ def call_tool(name, args):
                 "note": "" if ok else "被限频拒绝了，别重试，跟主人说一声"}
     if name == "bili_share_to_owner":
         return share(args)
+    if name == "bili_ep_report":
+        return ep_report(args)
     if name == "bili_frame_grab":
         return frame_grab(args)
     if name == "bili_watch_episode":

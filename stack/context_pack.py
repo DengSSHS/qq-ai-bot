@@ -301,6 +301,20 @@ def build(reason=""):
     if b:
         lines.append("你的状态：%s" % b)
 
+    # 心情（2026-11-09）：mood.py 每 5 分钟判一次涨跌、没人聊就往 0.5 回落
+    try:
+        m = _json(os.path.join(BASE, "memory/mood.json"), {})
+        if m and m.get("value") is not None:
+            v = float(m["value"])
+            mood_desc = "挺好" if v >= 0.65 else ("还行" if v >= 0.5 else ("有点低" if v >= 0.35 else "很低"))
+            lines.append("你此刻的心情：%s（%.2f/1，%s%s）"
+                         % (m.get("label") or mood_desc, v, mood_desc,
+                            ("，" + str(m.get("why"))[:16]) if m.get("why") else ""))
+            if v < 0.35:
+                lines.append("（心情低的时候别硬装开心，也别突然热情；可以只说一句实话）")
+    except Exception:
+        pass
+
     lines.append("")
     lines.append("要求：上面是真实情况。挑**一件具体的**说一句——比如他那边冷不冷、最近看过的东西、"
                  "记忆里没聊完的事；如果连一件具体的都挑不出来，而且还没问过他在哪个城市，就问这个。"
