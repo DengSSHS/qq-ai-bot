@@ -42,6 +42,48 @@ WHISPER = "/opt/tulpa/tools/whispercpp/bin/whisper-cli"
 MODEL = "/opt/tulpa/.cache/voice-models/ggml-small-q5_1.bin"
 
 
+def dedupe(rows):
+    """合并连续重复：whisper 打转时会连着吐同一句，只留第一次并记次数。"""
+    out = []
+    for r in rows:
+        text = (r.get("text") or "").strip()
+        if out and text and text == (out[-1].get("text") or "").strip():
+            out[-1]["repeat"] = out[-1].get("repeat", 1) + 1
+            out[-1]["t1"] = r.get("t1") or out[-1].get("t1")
+            continue
+        out.append(dict(r))
+    return out
+
+
+def _norm(t):
+    return "".join(ch for ch in str(t or "") if ch.isalnum())
+
+
+def detect_recap(p, season, ep, lines):
+    """开头是不是上一集的回放：拿本集前 90 秒的台词，和上一集最后 120 秒比字面重合。"""
+    if ep <= 1 or not lines:
+        return 0
+    prev = os.path.join(os.path.dirname(p["jsonl"]), "ep%d.jsonl" % (ep - 1))
+    if not os.path.exists(prev):
+        return 0
+    try:
+        prows = [json.loads(x) for x in io.open(prev, encoding="utf-8") if x.strip()]
+    except Exception:
+        return 0
+    if not prows:
+        return 0
+    tail = _norm("".join(r.get("text", "") for r in prows if float(r.get("t0") or 0) > max(
+        0, max(float(x.get("t0") or 0) for x in prows) - 120)))
+    head = _norm("".join(r.get("text", "") for r in lines if float(r.get("t0") or 0) < 90))
+    if len(head) < 40 or len(tail) < 40:
+        return 0
+    # 用 4-gram 重合率，比整串包含更稳（回放会有轻微转写差异）
+    grams = {head[i:i + 4] for i in range(len(head) - 3)}
+    hit = sum(1 for g in grams if g in tail)
+    ratio = hit / max(1, len(grams))
+    return 90 if ratio >= 0.25 else 0
+
+
 def say(msg):
     print("%s %s" % (time.strftime("%H:%M:%S"), msg), flush=True)
 
@@ -97,7 +139,10 @@ def transcribe_window(audio, start, length, tag, threads):
     if not os.path.exists(wav) or os.path.getsize(wav) < 1000:
         return []
     out = "/tmp/_watch_%s" % tag
+    # -mc 0：不继承上文 → 片尾音乐不会再"复读上一句"（实测 ep1 尾段复读 25 次）
+    # -sns：压掉 [音楽] 这类非语音标记（实测占 11.8% 的句子）
     subprocess.run([WHISPER, "-m", MODEL, "-f", wav, "-l", "ja", "-t", str(threads),
+                    "-mc", "0", "-sns",
                     "-oj", "-of", out, "-np"], capture_output=True, timeout=1800)
     os.unlink(wav)
     try:
@@ -130,9 +175,17 @@ def main():
     ap.add_argument("--window", type=int, default=300, help="每片多少秒，默认 300")
     ap.add_argument("--threads", type=int, default=2, help="whisper 线程数")
     ap.add_argument("--status", action="store_true", help="只看进度")
+    ap.add_argument("--redo", action="store_true",
+                    help="重转这一集（换了参数/修了 bug 之后用）")
     args = ap.parse_args()
 
     p = paths(int(args.season), args.ep)
+    if args.redo:
+        for key in ("jsonl", "progress", "md"):
+            target = p.get(key)
+            if target and os.path.exists(target):
+                os.unlink(target)
+        say("已清空第 %d 集的旧转写，从头重来" % args.ep)
     c = Content(Settings(ROOT), net=SafeHTTP())
     info = c.info("ss%s" % args.season, args.ep)
     duration = float(info["duration_seconds"])
@@ -171,15 +224,24 @@ def main():
             % (done / duration * 100, done - length, done, len(rows), time.time() - t0,
                "有" if got else "无"))
 
-    # 收尾：导出人看的台词稿
+    # 收尾：去重 + 标回放 + 导出人看的台词稿
     lines = [json.loads(x) for x in io.open(p["jsonl"], encoding="utf-8") if x.strip()]
     lines.sort(key=lambda r: r["t0"])
+    lines = dedupe(lines)
+    recap_until = detect_recap(p, int(args.season), args.ep, lines)
+    if recap_until:
+        say("开头 0–%d 秒疑似上一集的回放，已标记" % recap_until)
+    meta = json.loads(io.open(p["meta"], encoding="utf-8").read())
+    meta["recap_until"] = recap_until
+    meta["lines"] = len(lines)
+    io.open(p["meta"], "w", encoding="utf-8").write(json.dumps(meta, ensure_ascii=False))
     with io.open(p["md"], "w", encoding="utf-8") as f:
         f.write("# %s · 第 %d 集\n\n" % (info["title"], args.ep))
         f.write("时长 %.0f 秒；台词 %d 句；来源：本地 whisper 转写（可能误听）。\n\n"
                 % (duration, len(lines)))
         for r in lines:
-            f.write("[%02d:%02d] %s\n" % (r["t0"] // 60, r["t0"] % 60, r["text"]))
+            mark = "（上集回放）" if recap_until and r["t0"] < recap_until else ""
+            f.write("[%02d:%02d] %s%s\n" % (r["t0"] // 60, r["t0"] % 60, r["text"], mark))
     say("完成：%d 句台词 → %s" % (len(lines), p["md"]))
     return 0
 

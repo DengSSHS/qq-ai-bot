@@ -259,7 +259,39 @@ TOOLS.extend([{
                                    "from_sec": {"type": "number"},
                                    "limit": {"type": "integer"}},
                     "required": ["ep"]},
+}, {
+    "name": "bili_frame_grab",
+    "description": ("从某一集里抠几张画面直接看（用已缓存的视频，秒出）。"
+                    "番剧画面里有硬字幕，比转写稿靠谱——转写会打转、会带回放。"
+                    "不传 times 就按均分取 count 张；给了 times 就按指定秒数。"),
+    "inputSchema": {"type": "object",
+                    "properties": {"season": {"type": "integer", "description": "番剧 ss 号，默认 73077"},
+                                   "ep": {"type": "integer"},
+                                   "count": {"type": "integer", "description": "均分取几张，默认 4，最多 8"},
+                                   "times": {"type": "array", "items": {"type": "number"},
+                                             "description": "指定秒数，最多 8 个"}},
+                    "required": ["ep"]},
 }])
+
+
+def _content_blocks(out):
+    """工具结果转 MCP content：图片以 image 块返回，文字照旧进 text 块。
+
+    番剧的硬字幕就在画面里，图能到模型眼前比文字描述可靠得多。
+    """
+    body = {k: v for k, v in out.items() if k != "__images__"} if isinstance(out, dict) else out
+    blocks = []
+    if body or not (isinstance(out, dict) and out.get("__images__")):
+        blocks.append({"type": "text", "text": json.dumps(body, ensure_ascii=False)})
+    for path in (out.get("__images__") if isinstance(out, dict) else None) or []:
+        try:
+            import base64
+            with open(path, "rb") as fh:
+                blocks.append({"type": "image", "mimeType": "image/jpeg",
+                               "data": base64.b64encode(fh.read()).decode()})
+        except Exception:
+            continue
+    return blocks or [{"type": "text", "text": "{}"}]
 
 
 def reply(obj):
@@ -329,6 +361,7 @@ def wait_job(res, budget_s=30, interval=1.5):
 WATCH_DIR = "/opt/tulpa/data/bilibili/watch"
 WATCH_PY = "/opt/dsh/bili_watch_episode.py"
 WATCH_PYTHON = "/opt/tulpa/.venv/bin/python"
+WATCH_FFMPEG = ("/opt/tulpa/.venv/lib/python3.13/site-packages/imageio_ffmpeg/binaries/ffmpeg-linux-x86_64-v7.0.2")
 
 
 def _watch_files(season, ep):
@@ -425,6 +458,69 @@ def watch_read(args):
             "note": "本地转写，可能误听；时间码是绝对秒数。"}
 
 
+def frame_grab(args):
+    """抠几张画面给她看：番剧的硬字幕就在画面里，比转写靠谱。"""
+    season = int(args.get("season") or 73077)
+    ep = int(args.get("ep") or 1)
+    times = args.get("times") or []
+    count = max(1, min(int(args.get("count") or 4), 8))
+    f = _watch_files(season, ep)
+    video = os.path.join(f["dir"], "video.mp4")
+    if not os.path.exists(video):
+        return {"ok": False,
+                "error": {"code": "no_media",
+                          "message": "这一集还没缓存视频，先调一次 bili_watch_episode（会顺带下载）"},
+                "note": "下载一次性，之后抠帧几秒就好。"}
+    meta = {}
+    try:
+        meta = json.load(io.open(f["meta"], encoding="utf-8"))
+    except Exception:
+        pass
+    duration = float(meta.get("duration") or 0)
+    if times:
+        stamps = [round(float(t), 2) for t in times[:8]]
+    else:
+        # 均分抽帧常落在空镜头/过场上（实测 178 秒是一滩水面，没有字幕）。
+        # 改成从台词里挑：在"有说话"的句子里均匀取样，这样每张画面都带那句字幕。
+        stamps = []
+        rows = []
+        if os.path.exists(f["jsonl"]):
+            for ln in io.open(f["jsonl"], encoding="utf-8"):
+                ln = ln.strip()
+                if not ln:
+                    continue
+                try:
+                    r = json.loads(ln)
+                except Exception:
+                    continue
+                text = str(r.get("text") or "").strip()
+                if len(text) >= 6 and "音楽" not in text and "字幕" not in text:
+                    rows.append(float(r.get("t0") or 0))
+        rows.sort()
+        if len(rows) >= count:
+            step = len(rows) / count
+            stamps = [round(rows[int(i * step)] + 0.4, 2) for i in range(count)]
+        elif duration:
+            stamps = [round(duration * (i + 0.5) / count, 2) for i in range(count)]
+        else:
+            stamps = [60.0 * (i + 1) for i in range(count)]
+    outdir = os.path.join(f["dir"], "grab")
+    os.makedirs(outdir, exist_ok=True)
+    saved = []
+    for t in stamps:
+        path = os.path.join(outdir, "t%05d.jpg" % int(t))
+        subprocess.run([WATCH_FFMPEG, "-nostdin", "-v", "error", "-ss", str(t), "-i", video,
+                        "-frames:v", "1", "-vf", "scale=1280:-2", "-q:v", "3", "-y", path],
+                       capture_output=True, timeout=90)
+        if os.path.exists(path) and os.path.getsize(path) > 2000:
+            saved.append({"t": t, "path": path})
+    if not saved:
+        return {"ok": False, "error": {"code": "grab_failed", "message": "没抠出画面"}}
+    return {"ok": True, "ep": ep, "count": len(saved), "frames": saved,
+            "__images__": [x["path"] for x in saved],
+            "note": "画面里的硬字幕才是最可靠的台词来源。"}
+
+
 def call_tool(name, args):
     if name == "bili_now":
         ok, why, left = gate()
@@ -437,6 +533,8 @@ def call_tool(name, args):
                 "note": "" if ok else "被限频拒绝了，别重试，跟主人说一声"}
     if name == "bili_share_to_owner":
         return share(args)
+    if name == "bili_frame_grab":
+        return frame_grab(args)
     if name == "bili_watch_episode":
         return watch_episode(args)
     if name == "bili_watch_status":
@@ -708,7 +806,7 @@ def main():
             except Exception as e:
                 out = {"ok": False, "error": {"code": "crash", "message": str(e)[:140]}}
             reply({"jsonrpc": "2.0", "id": mid, "result": {
-                "content": [{"type": "text", "text": json.dumps(out, ensure_ascii=False)}],
+                "content": _content_blocks(out),
                 "isError": False}})
         elif mid is not None:
             reply({"jsonrpc": "2.0", "id": mid,
