@@ -549,6 +549,8 @@ def frame_grab(args):
     if not saved:
         return {"ok": False, "error": {"code": "grab_failed", "message": "没抠出画面"}}
     return {"ok": True, "ep": ep, "count": len(saved), "frames": saved,
+            # 明确标出她白名单里能读的那份，省得她自己猜
+            "mirror_dir": mirror,
             "__images__": [x["path"] for x in saved],
             "note": "画面里的硬字幕才是最可靠的台词来源。"}
 
