@@ -90,8 +90,18 @@ def tool_diary_write(args):
         search_index.rebuild()
     except Exception:
         log('search_index.rebuild failed: %s' % traceback.format_exc())
+    # 写完顺手抽成事实。
+    # 为什么是同步而不是后台线程（2026-11-09 实测）：stdio MCP 进程在回完这次调用后
+    # 很快退出，daemon 线程直接被带走 —— 连指纹文件都没写出来，事实一条没进库。
+    # 同步多花 3~5 秒，但日记本来就不是实时对话，等得起。
+    try:
+        import mem_facts
+        got = mem_facts.ingest(text, float(args.get("importance") or 0.55), "diary")
+        if got:
+            log("facts ingested %d 条" % len(got))
+    except Exception:
+        log('facts ingest failed: %s' % traceback.format_exc())
     return "记下了（%s）" % head
-
 
 def tool_diary_recent(args):
     n = int(args.get("n") or 5)
