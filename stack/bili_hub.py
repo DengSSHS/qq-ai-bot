@@ -551,6 +551,12 @@ def call_tool(name, args):
     if name == "bili_frame_grab":
         return frame_grab(args)
     if name == "bili_watch_episode":
+        # 追番单集要吃 16 分钟双核：纳入浏览窗口限制（和刷 B 站同一个时段），
+        # 但**不占 token 额度**——它不花模型钱，只花 CPU。
+        ok, why, left = gate()
+        if not ok:
+            return {"ok": False, "error": {"code": "window_closed", "message": why},
+                    "note": "现在不是能刷 B 站的时候，别硬开追番任务。跟主人说一声。"}
         return watch_episode(args)
     if name == "bili_watch_status":
         return _watch_state(int(args.get("season") or 73077), int(args.get("ep") or 1))
