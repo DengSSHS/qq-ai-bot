@@ -107,7 +107,9 @@ def export_only(p, info, ep, season):
         f.write("# %s · 第 %d 集\n\n" % (info["title"], ep))
         f.write("时长 %.0f 秒；台词 %d 句；来源：本地 whisper 转写（可能误听）。\n"
                 % (duration, len(rows)))
-        f.write("开头判定：%s（与上一集重合 %.0f%%）\n" % (head["kind"], head["ratio"] * 100))
+        f.write("开头说明：不做自动判定。每集 OP 位置不同，而且 OP 前面常有一小段冷开场正片"
+                "（用户 2026-11-09 指出）；与上一集的台词重合率 %.0f%% 仅供参考。\n"
+                % (head["ratio"] * 100))
         f.write("\n")
         for r in rows:
             mark = "（上集回放）" if recap_until and r["t0"] < recap_until else ""

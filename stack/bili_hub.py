@@ -263,13 +263,19 @@ TOOLS.extend([{
     "name": "bili_frame_grab",
     "description": ("从某一集里抠几张画面直接看（用已缓存的视频，秒出）。"
                     "番剧画面里有硬字幕，比转写稿靠谱——转写会打转、会带回放。"
+                    "注意：片头曲位置每集不同，OP 前面常有一小段冷开场正片，"
+                    "所以别假设第 0 秒就是 OP；要定位就用 range_start/range_end 扫一段。"
                     "不传 times 就按均分取 count 张；给了 times 就按指定秒数。"),
     "inputSchema": {"type": "object",
                     "properties": {"season": {"type": "integer", "description": "番剧 ss 号，默认 73077"},
                                    "ep": {"type": "integer"},
-                                   "count": {"type": "integer", "description": "均分取几张，默认 4，最多 8"},
+                                   "count": {"type": "integer", "description": "取几张，默认 4，最多 8"},
                                    "times": {"type": "array", "items": {"type": "number"},
-                                             "description": "指定秒数，最多 8 个"}},
+                                             "description": "指定秒数，最多 8 个"},
+                                   "range_start": {"type": "number",
+                                                   "description": "只看某一段时给起点秒数（如看开头 4 分钟填 0）"},
+                                   "range_end": {"type": "number",
+                                                 "description": "只看某一段时给终点秒数（如 240）"}},
                     "required": ["ep"]},
 }])
 
@@ -481,8 +487,13 @@ def frame_grab(args):
     except Exception:
         pass
     duration = float(meta.get("duration") or 0)
+    r0, r1 = args.get("range_start"), args.get("range_end")
     if times:
         stamps = [round(float(t), 2) for t in times[:8]]
+    elif r0 is not None and r1 is not None and float(r1) > float(r0):
+        # 只看一段（比如开头几分钟，找 OP 到底从哪开始）
+        a, b = float(r0), float(r1)
+        stamps = [round(a + (b - a) * (i + 0.5) / count, 2) for i in range(count)]
     else:
         # 均分抽帧常落在空镜头/过场上（实测 178 秒是一滩水面，没有字幕）。
         # 改成从台词里挑：在"有说话"的句子里均匀取样，这样每张画面都带那句字幕。
