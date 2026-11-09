@@ -274,6 +274,13 @@ def apply():
         if night_used >= night_max:
             return "凌晨叫醒已用 %d/%d（给晚上留额度）" % (night_used, night_max)
     last = st.get("last_auto_ts", 0)
+    # 命中线模型（抄 dsh-speak-up 的设计，比"每天固定掷一次骰子"稳）：
+    #   line 初始 0.5；每检查一次没中就 +0.1（越来越容易开口），命中了回到 0.5
+    #   太久没说话（>6h）把 line ×1.5，但封顶 0.98
+    # 好处：一天内的行为是"逐渐积累的倾向"，不是"一次掷中就一直命中"。
+    line = float(st.get("nudge_line", 0.5))
+    cold_hours = (time.time() - last) / 3600.0 if last else 0.0
+    eff = min(0.98, line * (1.5 if cold_hours >= 6 else 1.0))
     # 2026-11-09 实测事故：roll 按「天」固定（当天恒为 0.11），prob ≥ 0.25，
     # 于是每分钟都满足 roll < prob → 每分钟叫她一次；19:41–19:59 连叫 63 次，
     # 她每被叫一次就回一句「不刷。」= 刷屏。原来靠"每天 6 次"的上限挡着，
@@ -283,21 +290,24 @@ def apply():
         return "距上次叫她还没到 %.0f 分钟（%.0f 分钟前）" % (
             gap_min, (time.time() - last) / 60.0)
     hours = max(0.0, (time.time() - last) / 3600.0) if last else 1.0
-    prob = min(float(cfg["ramp_cap"]), float(cfg["ramp_per_hour"]) * (1 + hours))
-    # 按「小时」掷：原来是按天，同一天内 roll 恒定，一次命中就会每小时/每分钟重复命中
-    roll = _roll("bili_night", time.strftime("%F-%H"))
-    if roll >= prob:
-        return "低谷期，掷出 %.2f >= %.2f，这小时先不叫" % (roll, prob)
+    # 用随机数比命中线（不再是"每天固定值 vs 概率"的对比）
+    roll = _roll("bili_night", time.strftime("%F-%H-%M"))      # 每分钟都是新的掷点
+    if roll >= eff:
+        st["nudge_line"] = min(0.95, line + 0.1)
+        save(st)
+        return "低谷期，掷出 %.2f >= 命中线 %.2f（下次升到 %.2f）" % (
+            roll, eff, st["nudge_line"])
     ok = _nudge("（现在是你的时间）去 B 站刷刷吧，看到有意思的记得在评论区 @ 我。")
     st["auto_opens"] = st.get("auto_opens", 0) + 1
     if int(time.strftime("%H")) < 8:
         st["night_opens"] = int(st.get("night_opens", 0)) + 1
     st["last_auto_ts"] = int(time.time())
+    st["nudge_line"] = 0.5            # 命中了，回到初始线
     save(st)
-    log("nudge sent (roll=%.2f prob=%.2f, %d/%d)" % (
-        roll, prob, st["auto_opens"], cfg["daily_auto_opens"]))
-    return "掷出 %.2f < %.2f，已叫她（%d/%d）" % (
-        roll, prob, st["auto_opens"], cfg["daily_auto_opens"])
+    log("nudge sent (roll=%.2f line=%.2f, %d/%d)" % (
+        roll, eff, st["auto_opens"], cfg["daily_auto_opens"]))
+    return "掷出 %.2f < 命中线 %.2f，已叫她（%d/%d）" % (
+        roll, eff, st["auto_opens"], cfg["daily_auto_opens"])
 
 
 def status():
