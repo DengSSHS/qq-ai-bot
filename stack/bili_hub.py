@@ -23,6 +23,7 @@ import io
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -528,6 +529,9 @@ def frame_grab(args):
     # 帧必须落在「主和她都能读」的目录：他读 media / workspace，她读 workspace / media/onebot,
     # 交集只有 workspace —— 2026-11-09 两次踩这个坑（先后放在 tulpa 和 media/bili-frames）。
     outdir = os.path.join("/opt/dsh/workspace/bili-frames/ss%s" % season, "ep%d" % ep)
+    # 同时留一份到 media/onebot（她的白名单里明确包含这个目录）——
+    # 2026-11-09 实测：只有 workspace 那份时她说读不到，双写最稳。
+    mirror = os.path.join("/opt/dsh/media/onebot/bili-frames/ss%s" % season, "ep%d" % ep)
     os.makedirs(outdir, exist_ok=True)
     saved = []
     for t in stamps:
@@ -537,6 +541,11 @@ def frame_grab(args):
                        capture_output=True, timeout=90)
         if os.path.exists(path) and os.path.getsize(path) > 2000:
             saved.append({"t": t, "path": path})
+            try:
+                os.makedirs(mirror, exist_ok=True)
+                shutil.copy2(path, os.path.join(mirror, os.path.basename(path)))
+            except Exception:
+                pass
     if not saved:
         return {"ok": False, "error": {"code": "grab_failed", "message": "没抠出画面"}}
     return {"ok": True, "ep": ep, "count": len(saved), "frames": saved,
