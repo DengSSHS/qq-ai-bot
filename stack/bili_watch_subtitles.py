@@ -147,7 +147,7 @@ def main():
             _up_min = float(_f.read().split()[0]) / 60.0
     except Exception:
         _up_min = 999.0
-    _state = os.path.join(D, "ss%d" % args.season, "ep%d.ratelimit.json" % args.ep)
+    _state = os.path.join(WATCH, "ss%d" % args.season, "ep%d.ratelimit.json" % args.ep)
     if _up_min < 15 and not args.force:
         print("刚开机 %.0f 分钟，先不动 B 站（避免刚登录就被刷）。" % _up_min)
         return 2

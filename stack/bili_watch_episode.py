@@ -296,6 +296,23 @@ def read_progress(p):
     try:
         return float(io.open(p["prog"], encoding="utf-8").read().strip())
     except Exception:
+        pass
+    # 2026-11-10：progress 文件是后加的护栏才有的，之前跑完的集（ep7）没有这个文件，
+    # 结果 --status 报 0%，看起来像一集都没看。台词稿是顺序追加的，
+    # 没有 progress 就退回「最后一条台词的结束时刻」。
+    try:
+        last = 0.0
+        with io.open(p["jsonl"], encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    last = max(last, float(json.loads(line).get("t1") or 0))
+                except Exception:
+                    continue
+        return last
+    except Exception:
         return 0.0
 
 
