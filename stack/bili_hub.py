@@ -243,7 +243,9 @@ TOOLS.extend([{
                     "别用 search_videos 找番剧——那只会搜到别人的解说。"),
     "inputSchema": {"type": "object",
                     "properties": {"season": {"type": "integer", "description": "番剧 ss 号，默认 73077"},
-                                   "ep": {"type": "integer", "description": "第几集，从 1 开始"}},
+                                   "ep": {"type": "integer", "description": "第几集，从 1 开始"},
+                                   "force": {"type": "boolean",
+                                             "description": "跳过风控护栏强制重跑（主人明确要求时才用）"}},
                     "required": ["ep"]},
 }, {
     "name": "bili_watch_status",
@@ -399,6 +401,23 @@ def _watch_state(season, ep):
     if os.path.exists(f["jsonl"]):
         lines = sum(1 for ln in io.open(f["jsonl"], encoding="utf-8") if ln.strip())
     duration = float(meta.get("duration") or 0)
+    # 兜底：老版本的 OCR 任务不写 progress 文件，进度会一直显示 0，
+    # 让她以为卡死而反复重启（2026-11-09 实际发生过）。有 jsonl 就按覆盖末尾算。
+    if done <= 0 and os.path.exists(f["jsonl"]):
+        try:
+            last = 0.0
+            for ln in io.open(f["jsonl"], encoding="utf-8"):
+                ln = ln.strip()
+                if not ln:
+                    continue
+                try:
+                    last = max(last, float(json.loads(ln).get("t1") or 0))
+                except Exception:
+                    continue
+            if last > 0:
+                done = last
+        except Exception:
+            pass
     running = False
     try:
         pid = int(io.open(f["lock"], encoding="utf-8").read().strip())
@@ -409,8 +428,80 @@ def _watch_state(season, ep):
     return dict(season=season, ep=ep, title=meta.get("title"), duration_seconds=duration,
                 done_until=round(done, 1), lines=lines, running=running,
                 percent=round(done / duration * 100, 1) if duration else 0.0,
-                finished=bool(duration) and done >= duration - 1,
+                # 覆盖率 99% 以上就算完成：片尾常有几秒没字幕，卡在 99.5% 会让她以为没跑完
+                finished=bool(duration) and (done >= duration - 1 or done >= duration * 0.99),
                 transcript=f["md"] if os.path.exists(f["md"]) else None)
+
+
+# ---- 风控护栏（2026-11-09 实测教训）------------------------------------
+# 那天为了核对一集，我反复重跑了同一个 playurl 五遍（改写 → 重跑 → 再重跑），
+# 加上频繁重启，最后撞上 B 站风控，主人只能关机 + 实名解除。
+# 所以给"会打 B 站接口的动作"加三道闸：
+RATE_DB = "/opt/dsh/memory/bili-rate.json"
+MIN_GAP_MIN = 45          # 同一集两次尝试至少隔 45 分钟
+FAIL_COOLDOWN_MIN = 180   # 连续失败 3 次 → 这集冷却 3 小时
+BOOT_GRACE_MIN = 15       # 刚开机这段时间不发请求（刚登录就被刷最容易出事）
+
+
+def _rate_load():
+    try:
+        return json.load(io.open(RATE_DB, encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _rate_save(d):
+    try:
+        os.makedirs(os.path.dirname(RATE_DB), exist_ok=True)
+        tmp = RATE_DB + ".tmp"
+        io.open(tmp, "w", encoding="utf-8").write(json.dumps(d, ensure_ascii=False, indent=1))
+        os.replace(tmp, RATE_DB)
+    except Exception:
+        pass
+
+
+def _uptime_minutes():
+    try:
+        with io.open("/proc/uptime") as f:
+            return float(f.read().split()[0]) / 60.0
+    except Exception:
+        return 999.0
+
+
+def rate_gate(season, ep, force=False):
+    """能不能现在去动这一集。返回 (ok, 原因)。"""
+    if force:
+        return True, "手动跳过护栏"
+    up = _uptime_minutes()
+    if up < BOOT_GRACE_MIN:
+        return False, ("刚开机 %.0f 分钟，先不动 B 站（刚登录就被刷最容易触发风控），"
+                       "%.0f 分钟后再来" % (up, BOOT_GRACE_MIN - up))
+    d = _rate_load()
+    key = "ss%d:ep%d" % (season, ep)
+    rec = d.get(key) or {}
+    now = time.time()
+    last = float(rec.get("last") or 0)
+    fails = int(rec.get("fails") or 0)
+    if fails >= 3 and now - last < FAIL_COOLDOWN_MIN * 60:
+        return False, ("这一集连续失败 %d 次，冷却中（还剩 %.0f 分钟）。"
+                       "先查 %s 看错在哪，别硬重试" %
+                       (fails, (FAIL_COOLDOWN_MIN * 60 - (now - last)) / 60,
+                        "/opt/tulpa/data/bilibili/watch/ss%d/ep%d.log" % (season, ep)))
+    if last and now - last < MIN_GAP_MIN * 60:
+        return False, ("同一集 %.0f 分钟前刚动过，再等 %.0f 分钟（B 站会风控重复请求）" %
+                       ((now - last) / 60, (MIN_GAP_MIN * 60 - (now - last)) / 60))
+    return True, "可以"
+
+
+def rate_note(season, ep, ok):
+    """记一次尝试（成功清掉失败计数）。"""
+    d = _rate_load()
+    key = "ss%d:ep%d" % (season, ep)
+    rec = d.get(key) or {}
+    rec["last"] = time.time()
+    rec["fails"] = 0 if ok else int(rec.get("fails") or 0) + 1
+    d[key] = rec
+    _rate_save(d)
 
 
 def watch_episode(args):
@@ -424,6 +515,11 @@ def watch_episode(args):
     if st["running"]:
         st["note"] = "正在看，过一会儿用 bili_watch_status 查。"
         return st
+    ok, why = rate_gate(season, ep, bool(args.get("force")))
+    if not ok:
+        st["note"] = why
+        st["blocked"] = "rate_gate"
+        return st
     f = _watch_files(season, ep)
     os.makedirs(f["dir"], exist_ok=True)
     log = io.open(f["log"], "ab")
@@ -434,6 +530,7 @@ def watch_episode(args):
                             stdout=log, stderr=log, stdin=subprocess.DEVNULL,
                             start_new_session=True, close_fds=True)
     io.open(f["lock"], "w", encoding="utf-8").write(str(proc.pid))
+    rate_note(season, ep, True)
     st.update(running=True, pid=proc.pid,
               note="后台开始看这一集：约 3 分钟看 5 分钟剧情，用 bili_watch_status 查进度。")
     return st

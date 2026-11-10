@@ -133,11 +133,38 @@ def main():
     ap.add_argument("--step", type=float, default=2.0, help="每几秒抓一帧")
     ap.add_argument("--workers", type=int, default=8)
     # 2026-11-09 实测：1280 宽 274 token/帧，640 宽 94 token/帧，文本 15/17 一致。
+    ap.add_argument("--force", action="store_true", help="跳过风控护栏（主人明确要求时才用）")
     ap.add_argument("--width", type=int, default=640, help="字幕带缩放宽度，默认 640（省 64%% token）")
     ap.add_argument("--dup-diff", type=float, default=2.0,
                     help="字幕带像素平均差小于这个值就当作同一句，跳过 OCR")
     ap.add_argument("--max-minutes", type=int, default=240)
     args = ap.parse_args()
+
+    # 自身也挡一道：开机 15 分钟内、或同一集 45 分钟内动过，就退出。
+    # 外层（bili_hub）有同样的闸，这里防的是"绕过外层直接跑脚本"。
+    try:
+        with io.open("/proc/uptime") as _f:
+            _up_min = float(_f.read().split()[0]) / 60.0
+    except Exception:
+        _up_min = 999.0
+    _state = os.path.join(D, "ss%d" % args.season, "ep%d.ratelimit.json" % args.ep)
+    if _up_min < 15 and not args.force:
+        print("刚开机 %.0f 分钟，先不动 B 站（避免刚登录就被刷）。" % _up_min)
+        return 2
+    try:
+        _st = json.loads(io.open(_state, encoding="utf-8").read())
+        _last = float(_st.get("last") or 0)
+        if _last and time.time() - _last < 45 * 60 and not args.force:
+            print("这一集 %.0f 分钟前刚跑过，再等等（还剩 %.0f 分钟）。"
+                  % ((time.time() - _last) / 60, (45 * 60 - (time.time() - _last)) / 60))
+            return 2
+    except Exception:
+        pass
+    try:
+        os.makedirs(os.path.dirname(_state), exist_ok=True)
+        io.open(_state, "w", encoding="utf-8").write(json.dumps({"last": time.time()}))
+    except Exception:
+        pass
 
     sys.path.insert(0, TULPA)
     from tulpa_bilibili.content import Content
@@ -147,6 +174,8 @@ def main():
     d = os.path.join(WATCH, "ss%d" % args.season)
     os.makedirs(d, exist_ok=True)
     meta_p = os.path.join(d, "ep%d.meta.json" % args.ep)
+    prog_p = os.path.join(d, "ep%d.progress" % args.ep)
+    lock_p = os.path.join(d, "ep%d.lock" % args.ep)
     video = os.path.join(d, "ep%d.video.mp4" % args.ep)
 
     # 缺媒体就先按老路下载（这里只下视频，OCR 不需要音轨）
@@ -174,6 +203,11 @@ def main():
     while t < duration:
         times.append(round(t, 1))
         t += args.step
+    # 状态查询（bili_hub._watch_state）靠这两个文件判断"在不在跑、到哪了"。
+    # 第一版没写，结果她看到的是"进度 0%、进程没了"，以为卡死又重启了一遍。
+    io.open(lock_p, "w", encoding="utf-8").write(str(os.getpid()))
+    io.open(prog_p, "w", encoding="utf-8").write("0.00")
+
     say("ep%d《%s》 %.0f 秒，每 %.1f 秒一帧 → %d 帧，%d 路并发"
         % (args.ep, meta.get("title", ""), duration, args.step, len(times), args.workers))
 
@@ -213,6 +247,10 @@ def main():
             results[tt] = text if text is not None else ""
             spent_tokens += tok
             if done % 60 == 0:
+                try:
+                    io.open(prog_p, "w", encoding="utf-8").write("%.2f" % min(duration, tt))
+                except Exception:
+                    pass
                 el = time.time() - started
                 say("  %3.0f%%  %d/%d 帧  token %dk  已用 %.0f 分  预计还剩 %.0f 分"
                     % (100.0 * done / len(times), done, len(times), spent_tokens // 1000,
@@ -251,6 +289,14 @@ def main():
                 tokens=spent_tokens, skipped_frames=skipped, width=args.width,
                 ocr_at=time.strftime("%F %T"))
     io.open(meta_p, "w", encoding="utf-8").write(json.dumps(meta, ensure_ascii=False))
+    try:
+        io.open(prog_p, "w", encoding="utf-8").write("%.2f" % duration)
+    except Exception:
+        pass
+    try:
+        os.unlink(lock_p)
+    except OSError:
+        pass
     say("完成：%d 条字幕，token %dk，跳过 %d 帧（画面未变），用时 %.0f 分 → %s"
         % (len(rows), spent_tokens // 1000, skipped, (time.time() - started) / 60, md))
     log("ep%d season=%s frames=%d tokens=%d lines=%d"
