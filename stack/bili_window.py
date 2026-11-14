@@ -48,7 +48,8 @@ DEFAULTS = {
     # 累积随机：低谷期每多待一小时，"叫醒她"的概率抬高一档，封顶 ramp_cap
     "ramp_per_hour": 0.25,
     "ramp_cap": 0.9,
-    "nudge_min_gap_min": 90,   # 两次"叫她"之间至少隔这么久（2026-11-09 加，防刷屏）
+    "nudge_min_gap_min": 360,  # 两次"叫她"之间至少隔 6 小时（2026-11-15 从 90 改）：
+                                # 90 分钟 = 一天 16 次，每次 36k token 只换回一句「不刷。」
 }
 
 
@@ -224,8 +225,15 @@ def _notify_ids():
         return None, None
 
 
-def _nudge(text):
-    """往注入队列塞一条「主人」消息，等于叫醒她去刷。"""
+def _nudge(text, dry=True):
+    """往注入队列塞一条内部提醒，等于叫醒她去刷。
+
+    2026-11-15：`dry_run=True` 是关键（inject.js 支持单条注入带这个标记）。
+    这一轮照样走完整管线——她能看到提醒、能调工具去刷——但**所有出站消息被拦**。
+    之前不带 dry_run 时，她被叫醒却不刷，回一句「不刷。」，那三个字就真的发到
+    主人私聊里，一天十几条。带上 dry_run 后：没看就静默，看了由 share_new_views()
+    走 outbox 单独汇报（那条有计划、有内容，不是敷衍）。
+    """
     bot, own = _notify_ids()
     if not bot or not own:
         return False
@@ -235,6 +243,8 @@ def _nudge(text):
           "raw_message": text,
           "message": [{"type": "text", "data": {"text": text}}],
           "sender": {"user_id": own, "nickname": "主人"}}
+    if dry:
+        ev["dry_run"] = True
     try:
         path = os.path.join(BASE, "media/onebot/qq-inject.jsonl")
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -297,7 +307,8 @@ def apply():
         save(st)
         return "低谷期，掷出 %.2f >= 命中线 %.2f（下次升到 %.2f）" % (
             roll, eff, st["nudge_line"])
-    ok = _nudge("（现在是你的时间）去 B 站刷刷吧，看到有意思的记得在评论区 @ 我。")
+    ok = _nudge("（内部任务，不用回话）现在去 B 站看点什么。看到真有意思的，"
+                "用 bili_share_to_owner 发一张卡片或说一句；不想看就什么都别做。")
     st["auto_opens"] = st.get("auto_opens", 0) + 1
     if int(time.strftime("%H")) < 8:
         st["night_opens"] = int(st.get("night_opens", 0)) + 1
@@ -308,6 +319,53 @@ def apply():
         roll, eff, st["auto_opens"], cfg["daily_auto_opens"]))
     return "掷出 %.2f < 命中线 %.2f，已叫她（%d/%d）" % (
         roll, eff, st["auto_opens"], cfg["daily_auto_opens"])
+
+
+def share_new_views():
+    """她真的看了才汇报（2026-11-15）。
+
+    nudge 带 dry_run 后，她的“不刷。”被拦住不发了。但她真去刷的时候也不会
+    自动出声——这条负责补上：发现 bili-watched.jsonl 有**新条目**，就用她自己的
+    观后感（impression）发一条私聊。没新条目就什么都不做。
+    """
+    p = os.path.join(BASE, "memory/bili-watched.jsonl")
+    sp = os.path.join(BASE, "memory/bili-shared-tip.json")
+    try:
+        rows = [json.loads(x) for x in io.open(p, encoding="utf-8") if x.strip()]
+    except Exception:
+        return "看不了浏览记录"
+    if not rows:
+        return "还没看过东西"
+    try:
+        tip = float(json.loads(io.open(sp, encoding="utf-8").read()).get("until") or 0)
+    except Exception:
+        tip = 0.0
+    fresh = [r for r in rows if float(r.get("ts") or 0) > tip]
+    if not fresh:
+        return "没有新看的"
+    r = fresh[-1]
+    if float(r.get("ts") or 0) < time.time() - 12 * 3600:
+        # 半天前看的就别当新闻报了
+        io.open(sp, "w", encoding="utf-8").write(json.dumps({"until": max(x.get("ts", 0) for x in fresh)}))
+        return "新记录太旧，不报"
+    title = (r.get("title") or "").strip()
+    feeling = (r.get("impression") or "").strip()
+    if not title:
+        return "记录没标题，不报"
+    text = "刚才看了《%s》%s" % (title[:40], ("——" + feeling[:110]) if feeling else "。")
+    out = os.path.join(BASE, "media/onebot/qq-outbox.jsonl")
+    try:
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        with io.open(out, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"chat_id": "private:%d" % int(os.environ.get("OWNER_QQ", "1709392682")),
+                                "text": text, "source": "bili:share", "ts": int(time.time())},
+                               ensure_ascii=False) + chr(10))
+        io.open(sp, "w", encoding="utf-8").write(
+            json.dumps({"until": max(x.get("ts", 0) for x in fresh)}))
+        log("share sent: %s" % text[:60])
+        return "已汇报：%s" % text[:40]
+    except Exception as ex:
+        return "汇报失败：%s" % ex
 
 
 def status():
@@ -336,6 +394,7 @@ if __name__ == "__main__":
         print(status())
     elif "--apply" in a:
         print(apply())
+        print(share_new_views())
     elif "--open" in a:
         i = a.index("--open")
         mins = int(a[i + 1]) if i + 1 < len(a) else 30
